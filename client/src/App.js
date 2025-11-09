@@ -1,5 +1,4 @@
-import React, { useEffect, useState } from "react";
-import { io } from "socket.io-client";
+import React from "react";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import Signup from "./pages/Signup";
 import Login from "./pages/Login";

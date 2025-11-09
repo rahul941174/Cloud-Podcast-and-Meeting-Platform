@@ -14,7 +14,7 @@ export default function Dashboard() {
         setMsg("Not logged in");
         setTimeout(() => navigate("/login"), 1000);
       });
-  }, []);
+  }, [navigate]); 
 
   const handleLogout = async () => {
     await api.post("/auth/logout");

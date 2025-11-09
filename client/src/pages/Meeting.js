@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import api from '../api'; 
 import { socket } from '../socket.js';
 import ChatBox from "../components/ChatBox";
 import useWebRTC from '../hooks/useWebRTC';
@@ -33,8 +33,7 @@ const Meeting = () => {
     // Fetch current user
     useEffect(() => {
         let mounted = true;
-        axios
-            .get("/api/auth/me", { withCredentials: true })
+        api.get("/auth/me", { withCredentials: true })
             .then((res) => {
                 if (!mounted) return;
                 console.log("✅ User fetched:", res.data.user);
@@ -157,8 +156,8 @@ const Meeting = () => {
 
         try {
             console.log("📝 Creating meeting...");
-            const res = await axios.post(
-                "/api/meetings/create",
+            const res = await api.post(
+                "/meetings/create",
                 { title: `${user.username}'s Meeting` },
                 { withCredentials: true }
             );
@@ -194,8 +193,8 @@ const Meeting = () => {
 
         try {
             console.log("📡 Calling API to verify meeting...");
-            const response = await axios.post(
-                `/api/meetings/join/${roomToJoin}`,
+            const response = await api.post(
+                `/meetings/join/${roomToJoin}`,
                 {},
                 { withCredentials: true }
             );
