@@ -2,7 +2,9 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { socket } from '../socket.js';
 import ChatBox from "../components/ChatBox";
-
+import useWebRTC from '../hooks/useWebRTC';
+import VideoGrid from '../components/VideoGrid';
+import MediaControls from '../components/MediaControls';
 
 const Meeting = () => {
     const [meetingId, setMeetingId] = useState('');
@@ -13,6 +15,20 @@ const Meeting = () => {
     const [msg, setMsg] = useState("");
     const [hostId, setHostId] = useState(null);
     const [socketConnected, setSocketConnected] = useState(false);
+
+    // 🎥 WebRTC Hook
+    const {
+        localStream,
+        remoteStreams,
+        isVideoEnabled,
+        isAudioEnabled,
+        toggleVideo,
+        toggleAudio
+    } = useWebRTC(
+        joined ? meetingId : null,  // Only activate WebRTC when joined
+        user?._id || user?.id,
+        participants
+    );
 
     // Fetch current user
     useEffect(() => {
@@ -48,7 +64,6 @@ const Meeting = () => {
         socket.on("connect", handleConnect);
         socket.on("disconnect", handleDisconnect);
 
-        // Check initial connection
         if (socket.connected) {
             console.log("🟢 Socket already connected:", socket.id);
             setSocketConnected(true);
@@ -178,7 +193,6 @@ const Meeting = () => {
         console.log("🚪 Attempting to join meeting:", roomToJoin);
 
         try {
-            // First verify meeting exists and is active via API
             console.log("📡 Calling API to verify meeting...");
             const response = await axios.post(
                 `/api/meetings/join/${roomToJoin}`,
@@ -187,7 +201,6 @@ const Meeting = () => {
             );
             console.log("✅ API verification successful:", response.data);
 
-            // Then join via socket
             const userId = (user._id || user.id).toString();
             console.log("📤 Emitting join-room socket event:", {
                 roomId: roomToJoin,
@@ -249,15 +262,14 @@ const Meeting = () => {
         localStorage.removeItem("currentRoomId");
     };
 
-    // Check if current user is host
     const isHost = user && hostId && (
         (user._id?.toString() === hostId.toString()) ||
         (user.id?.toString() === hostId.toString())
     );
 
     return (
-        <div style={{ textAlign: "center", marginTop: "40px" }}>
-            <h2>🎥 Meeting Room</h2>
+        <div style={{ padding: "20px", maxWidth: "1400px", margin: "0 auto" }}>
+            <h2 style={{ textAlign: "center" }}>🎥 Meeting Room</h2>
             
             {/* Debug Info */}
             <div style={{ 
@@ -266,24 +278,35 @@ const Meeting = () => {
                 margin: "10px auto", 
                 maxWidth: "600px",
                 fontSize: "12px",
-                textAlign: "left"
+                textAlign: "left",
+                borderRadius: "4px"
             }}>
                 <strong>Debug Info:</strong><br />
                 Socket: {socketConnected ? "🟢 Connected" : "🔴 Disconnected"}<br />
                 User: {user ? `✅ ${user.username}` : "❌ Not logged in"}<br />
                 Joined: {joined ? "✅ Yes" : "❌ No"}<br />
                 Room ID: {meetingId || "None"}<br />
-                Participants: {participants.length}
+                Participants: {participants.length}<br />
+                Video: {isVideoEnabled ? "🟢 On" : "🔴 Off"} | 
+                Audio: {isAudioEnabled ? "🟢 On" : "🔴 Off"}
             </div>
 
-            <p style={{ color: msg.includes("Error") ? "red" : "black" }}>{msg}</p>
+            <p style={{ 
+                textAlign: "center", 
+                color: msg.includes("Error") ? "red" : "black" 
+            }}>{msg}</p>
 
             {!joined ? (
-                <>
+                <div style={{ textAlign: "center" }}>
                     <div style={{ marginBottom: 20 }}>
                         <button 
                             onClick={handleCreateMeeting} 
-                            style={{ marginRight: 10 }}
+                            style={{ 
+                                marginRight: 10,
+                                padding: "10px 20px",
+                                fontSize: "16px",
+                                cursor: "pointer"
+                            }}
                             disabled={!user || !socketConnected}
                         >
                             Create New Meeting
@@ -316,7 +339,8 @@ const Meeting = () => {
                             padding: "15px", 
                             background: "#e8f5e9",
                             maxWidth: "500px",
-                            margin: "20px auto"
+                            margin: "20px auto",
+                            borderRadius: "8px"
                         }}>
                             <p style={{ margin: 0 }}>
                                 ✅ Meeting created successfully!
@@ -339,11 +363,35 @@ const Meeting = () => {
                             </button>
                         </div>
                     )}
-                </>
+                </div>
             ) : (
                 <>
-                    <h3>📍 Meeting Room: {meetingId}</h3>
-                    <div style={{ margin: "20px auto", maxWidth: "400px" }}>
+                    <h3 style={{ textAlign: "center" }}>📍 Meeting Room: {meetingId}</h3>
+
+                    {/* 🎥 VIDEO SECTION */}
+                    <VideoGrid
+                        localStream={localStream}
+                        remoteStreams={remoteStreams}
+                        participants={participants}
+                        currentUserId={user?._id || user?.id}
+                    />
+
+                    {/* 🎛️ MEDIA CONTROLS */}
+                    <MediaControls
+                        isVideoEnabled={isVideoEnabled}
+                        isAudioEnabled={isAudioEnabled}
+                        onToggleVideo={toggleVideo}
+                        onToggleAudio={toggleAudio}
+                    />
+
+                    {/* 👥 PARTICIPANTS LIST */}
+                    <div style={{ 
+                        margin: "20px auto", 
+                        maxWidth: "400px",
+                        backgroundColor: "#fff",
+                        padding: "15px",
+                        borderRadius: "8px"
+                    }}>
                         <strong>Participants ({participants.length}):</strong>
                         <ul style={{ listStyle: "none", padding: 0 }}>
                             {participants.length === 0 ? (
@@ -352,19 +400,25 @@ const Meeting = () => {
                                 participants.map((p) => (
                                     <li key={p.userId} style={{ padding: "5px" }}>
                                         {p.username}
-                                        {p.userId === hostId && " (Host)"}
+                                        {p.userId === hostId && " 👑 (Host)"}
                                     </li>
                                 ))
                             )}
                         </ul>
                     </div>
 
+                    {/* 💬 CHAT BOX */}
                     <ChatBox roomId={meetingId} user={user} />
 
-                    <div style={{ marginTop: 20 }}>
+                    {/* 🚪 MEETING CONTROLS */}
+                    <div style={{ marginTop: 20, textAlign: "center" }}>
                         <button 
                             onClick={handleLeaveMeeting}
-                            style={{ padding: "8px 16px" }}
+                            style={{ 
+                                padding: "10px 20px",
+                                marginRight: "10px",
+                                cursor: "pointer"
+                            }}
                         >
                             Leave Meeting
                         </button>
@@ -373,8 +427,7 @@ const Meeting = () => {
                             <button
                                 onClick={handleEndMeeting}
                                 style={{
-                                    marginLeft: 10,
-                                    padding: "8px 16px",
+                                    padding: "10px 20px",
                                     backgroundColor: "#dc3545",
                                     color: "white",
                                     border: "none",

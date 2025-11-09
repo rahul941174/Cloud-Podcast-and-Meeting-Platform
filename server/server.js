@@ -12,6 +12,9 @@ import meetingRoutes from './src/routes/meetingRoutes.js';
 import Meeting from './src/models/Meeting.js';
 import User from './src/models/User.js';
 
+// 🎥 Import WebRTC Handler
+import { registerWebRTCHandlers } from './src/webrtc/webrtcHandler.js';
+
 dotenv.config();
 const PORT = process.env.PORT || 5000;
 
@@ -19,8 +22,22 @@ connectDB();
 
 const app = express();
 
+const allowedOrigins = [
+    'http://localhost:3000',
+    process.env.FRONTEND_URL // Will be set on Render
+];
+
 app.use(cors({
-    origin: 'http://localhost:3000',
+    origin: function(origin, callback) {
+        // Allow requests with no origin (mobile apps, Postman, etc.)
+        if(!origin) return callback(null, true);
+        
+        if(allowedOrigins.indexOf(origin) === -1) {
+            const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+            return callback(new Error(msg), false);
+        }
+        return callback(null, true);
+    },
     credentials: true,
 }));
 
@@ -40,7 +57,7 @@ app.use("/api/meetings", meetingRoutes);
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: 'http://localhost:3000',
+        origin: allowedOrigins,
         methods: ['GET', 'POST'],
         credentials: true,
         allowedHeaders: ['Content-Type', 'Authorization']
@@ -99,8 +116,13 @@ async function removeParticipantFromMeeting(roomId, userId) {
     return meeting;
 }
 
+
 io.on("connection", (socket) => {
     console.log(`✅ New Client Connected: ${socket.id}`);
+
+    // This ADDS webrtc event listeners to the SAME socket
+    registerWebRTCHandlers(io, socket);
+
 
     // JOIN ROOM
     socket.on("join-room", async ({ roomId, userId, username }) => {
@@ -183,6 +205,7 @@ io.on("connection", (socket) => {
         }
     });
 
+    // CHAT MESSAGE
     socket.on("send-message", ({ roomId, userId, username, text }) => {
         try{
             if (!roomId || !text || !username) {
@@ -229,8 +252,6 @@ io.on("connection", (socket) => {
 
             // Mark meeting as inactive
             meeting.isActive = false;
-            
-            // 🔥 CLEAR ALL PARTICIPANTS
             meeting.participants = [];
             
             await meeting.save();
