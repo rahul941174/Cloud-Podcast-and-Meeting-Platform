@@ -1,7 +1,6 @@
 import { io } from "socket.io-client";
 
-// CRITICAL: Backend server URL - must be port 5000
-const BACKEND_URL = "http://localhost:5000";
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:5000";
 
 console.log("🔌 Initializing socket connection to:", BACKEND_URL);
 
