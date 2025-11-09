@@ -3,7 +3,7 @@ import axios from 'axios';
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:5000";
 
 const api = axios.create({
-    baseURL: BACKEND_URL,
+    baseURL: `${BACKEND_URL}/api`,  // ✅ FIX: Add /api prefix
     withCredentials: true,  // Send cookies with requests
     headers: {
         'Content-Type': 'application/json',
