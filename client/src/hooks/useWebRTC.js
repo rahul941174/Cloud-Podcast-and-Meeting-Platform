@@ -1,4 +1,3 @@
-// ✅ FIXED — added useCallback for stable functions
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { socket } from '../socket';
 
@@ -14,8 +13,9 @@ const useWebRTC = (roomId, userId, participants) => {
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
 
   const peerConnections = useRef({});
-
-  const iceServers = {
+  
+  // ✅ FIX 1: Move iceServers outside component or use useMemo
+  const iceServersRef = useRef({
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
@@ -31,7 +31,7 @@ const useWebRTC = (roomId, userId, participants) => {
         credential: 'openrelayproject',
       },
     ],
-  };
+  });
 
   // ==========================================
   // 1️⃣ INITIALIZE - Get local camera/mic
@@ -57,16 +57,23 @@ const useWebRTC = (roomId, userId, participants) => {
 
     initLocalStream();
 
-    // ✅ FIXED — copy ref to local variable to satisfy eslint
-    const pcs = peerConnections.current;
-
+    // ✅ FIX 2: Cleanup function with proper ref handling
     return () => {
-      if (localStream) {
-        localStream.getTracks().forEach((track) => track.stop());
+      // Copy ref to local variable for cleanup
+      const currentPeerConnections = peerConnections.current;
+      
+      // Stop all local tracks
+      const currentStream = localStream;
+      if (currentStream) {
+        currentStream.getTracks().forEach((track) => track.stop());
       }
-      Object.values(pcs).forEach((pc) => pc.close());
+      
+      // Close all peer connections
+      Object.values(currentPeerConnections).forEach((pc) => {
+        if (pc) pc.close();
+      });
     };
-  }, [roomId, userId, localStream]); // ✅ FIXED — added localStream dependency
+  }, [roomId, userId]); // ✅ FIX 3: Removed localStream from deps (causes infinite loop)
 
   // ==========================================
   // 2️⃣ CREATE PEER CONNECTION
@@ -75,7 +82,7 @@ const useWebRTC = (roomId, userId, participants) => {
     (peerId) => {
       console.log(`🔗 Creating peer connection for: ${peerId}`);
 
-      const pc = new RTCPeerConnection(iceServers);
+      const pc = new RTCPeerConnection(iceServersRef.current);
 
       if (localStream) {
         localStream.getTracks().forEach((track) => {
@@ -108,7 +115,7 @@ const useWebRTC = (roomId, userId, participants) => {
       peerConnections.current[peerId] = pc;
       return pc;
     },
-    [localStream, roomId] // ✅ FIXED — stable function
+    [localStream, roomId] // ✅ iceServers not needed (using ref)
   );
 
   // ==========================================
@@ -132,7 +139,7 @@ const useWebRTC = (roomId, userId, participants) => {
         console.error(`❌ Error calling peer ${peerId}:`, error);
       }
     },
-    [createPeerConnection, roomId] // ✅ FIXED — stable function dependency
+    [createPeerConnection, roomId]
   );
 
   // ==========================================
@@ -190,7 +197,7 @@ const useWebRTC = (roomId, userId, participants) => {
       socket.off('webrtc:answer', handleAnswer);
       socket.off('webrtc:ice-candidate', handleCandidate);
     };
-  }, [localStream, roomId, createPeerConnection]); // ✅ FIXED — added missing dep
+  }, [localStream, roomId, createPeerConnection]); // ✅ FIX 4: Added createPeerConnection
 
   // ==========================================
   // 5️⃣ HANDLE NEW PARTICIPANTS
@@ -206,7 +213,7 @@ const useWebRTC = (roomId, userId, participants) => {
         callPeer(participant.userId);
       }
     });
-  }, [participants, localStream, userId, callPeer]); // ✅ FIXED — added callPeer dependency
+  }, [participants, localStream, userId, callPeer]); // ✅ FIX 5: Added callPeer
 
   // ==========================================
   // 6️⃣ TOGGLE VIDEO
@@ -223,7 +230,7 @@ const useWebRTC = (roomId, userId, participants) => {
         });
       }
     }
-  }, [localStream, roomId]); // ✅ FIXED — stable function
+  }, [localStream, roomId]);
 
   // ==========================================
   // 7️⃣ TOGGLE AUDIO
@@ -240,7 +247,7 @@ const useWebRTC = (roomId, userId, participants) => {
         });
       }
     }
-  }, [localStream, roomId]); // ✅ FIXED — stable function
+  }, [localStream, roomId]);
 
   return {
     localStream,
