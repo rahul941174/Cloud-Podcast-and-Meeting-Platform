@@ -410,27 +410,41 @@ const Meeting = () => {
     };
 
     const handleDownloadRecording = async () => {
-        if (!meetingId) {
-            alert("No meeting ID");
-            return;
-        }
-        
+        if (!meetingId) return alert("No meeting ID");
+
         try {
             setMsg("⏳ Downloading recording...");
+
+            const token = localStorage.getItem("token");
+
+            const res = await fetch(
+            `${process.env.REACT_APP_BACKEND_URL}/api/recordings/download/${meetingId}`,
+            {
+                headers: { Authorization: `Bearer ${token}` }
+            }
+            );
+
+            if (!res.ok) throw new Error("Download failed");
+
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
             
-            // Create download link
-            const downloadUrl = `${process.env.REACT_APP_BACKEND_URL || 'http://localhost:5000'}/api/recordings/download/${meetingId}`;
-            
-            // Open in new tab to trigger download
-            window.open(downloadUrl, '_blank');
-            
-            setMsg("✅ Download started!");
-            
+            // auto trigger download
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `recording-${meetingId}.mp4`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+
+            setMsg("✅ Download complete!");
+
         } catch (error) {
-            console.error("❌ Download error:", error);
+            console.error(error);
             setMsg("❌ Error downloading recording");
         }
     };
+
 
     const isHost = user && hostId && (
         (user._id?.toString() === hostId.toString()) ||
