@@ -8,9 +8,10 @@ import connectDB from './src/config/db.js';
 import userRoutes from "./src/routes/userRoutes.js";
 import authRoutes from './src/routes/authRoutes.js';
 import meetingRoutes from './src/routes/meetingRoutes.js';
+import recordingRoutes from './src/routes/recordingRoutes.js';
 
 import Meeting from './src/models/Meeting.js';
-import User from './src/models/User.js';
+
 
 // 🎥 Import WebRTC Handler
 import { registerWebRTCHandlers } from './src/webrtc/webrtcHandler.js';
@@ -41,7 +42,8 @@ app.use(cors({
     credentials: true,
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cookieParser());
 
 app.get('/', (req, res) => {
@@ -52,6 +54,7 @@ app.get('/', (req, res) => {
 app.use("/api/users", userRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/meetings", meetingRoutes);
+app.use("/api/recordings", recordingRoutes);
 
 // HTTP + SOCKET.io Server
 const server = http.createServer(app);
@@ -302,6 +305,75 @@ io.on("connection", (socket) => {
             console.error("❌ Error removing participant on disconnect:", error.message);
         }
     });
+
+
+
+    // START RECORDING (Host only)
+    socket.on("start-recording", async ({ roomId, hostId }) => {
+        try {
+            console.log(`🎬 Host ${hostId} starting recording in room ${roomId}`);
+            
+            // Verify host
+            const meeting = await Meeting.findOne({ roomId });
+            if (!meeting) {
+                console.log("❌ Meeting not found");
+                return;
+            }
+            
+            if (meeting.host.toString() !== hostId.toString()) {
+                console.log("❌ Only host can start recording");
+                socket.emit("error", { message: "Only host can start recording" });
+                return;
+            }
+            
+            // Notify all participants to start recording
+            io.in(roomId).emit("recording-started", {
+                message: "Recording started by host",
+                startTime: new Date().toISOString()
+            });
+            
+            console.log(`✅ Recording started signal sent to room ${roomId}`);
+            
+        } catch (error) {
+            console.error("❌ start-recording error:", error);
+        }
+    });
+
+    
+    
+    // STOP RECORDING (Host only)
+    socket.on("stop-recording", async ({ roomId, hostId }) => {
+        try {
+            console.log(`🛑 Host ${hostId} stopping recording in room ${roomId}`);
+            
+            // Verify host
+            const meeting = await Meeting.findOne({ roomId });
+            if (!meeting) {
+                console.log("❌ Meeting not found");
+                return;
+            }
+            
+            if (meeting.host.toString() !== hostId.toString()) {
+                console.log("❌ Only host can stop recording");
+                socket.emit("error", { message: "Only host can stop recording" });
+                return;
+            }
+            
+            // Notify all participants to stop recording
+            io.in(roomId).emit("recording-stopped", {
+                message: "Recording stopped by host",
+                stopTime: new Date().toISOString()
+            });
+            
+            console.log(`✅ Recording stopped signal sent to room ${roomId}`);
+            
+        } catch (error) {
+            console.error("❌ stop-recording error:", error);
+        }
+    });
+
+
+
 
     socket.on("disconnecting", (reason) => {
         console.log(`⚠️ Socket ${socket.id} disconnecting:`, reason);

@@ -34,9 +34,9 @@ const useWebRTC = (roomId, userId, participants) => {
     ],
   });
 
-  // ==========================================
-  // 1️⃣ INITIALIZE - Get local camera/mic
-  // ==========================================
+
+  // INITIALIZE - Get local camera/mic
+
   useEffect(() => {
     if (!roomId || !userId) return;
 
@@ -77,14 +77,14 @@ const useWebRTC = (roomId, userId, participants) => {
     };
   }, [roomId, userId]); // Only depend on roomId and userId
 
-  // ==========================================
-  // 2️⃣ CREATE PEER CONNECTION
-  // ==========================================
+ 
+  // CREATE PEER CONNECTION
+
   const createPeerConnection = useCallback(
     (peerId) => {
       console.log(`🔗 Creating peer connection for: ${peerId}`);
 
-      const pc = new RTCPeerConnection(iceServersRef.current);
+      const pc = new RTCPeerConnection(iceServersRef.current); //It's just a JavaScript object with methods and properties. The actual network connection doesn't exist yet!
 
       if (localStream) {
         localStream.getTracks().forEach((track) => {
@@ -120,9 +120,8 @@ const useWebRTC = (roomId, userId, participants) => {
     [localStream, roomId]
   );
 
-  // ==========================================
-  // 3️⃣ CALL A PEER
-  // ==========================================
+  // CALL A PEER
+
   const callPeer = useCallback(
     async (peerId) => {
       console.log(`📞 Calling peer: ${peerId}`);
@@ -144,9 +143,7 @@ const useWebRTC = (roomId, userId, participants) => {
     [createPeerConnection, roomId]
   );
 
-  // ==========================================
-  // 4️⃣ SOCKET EVENT LISTENERS
-  // ==========================================
+  //  SOCKET EVENT LISTENERS
   useEffect(() => {
     if (!localStream) return;
 
@@ -183,7 +180,9 @@ const useWebRTC = (roomId, userId, participants) => {
       const pc = peerConnections.current[fromUserId];
       if (pc) {
         try {
-          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+           if (pc.remoteDescription) {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+           }
         } catch (error) {
           console.error(`❌ Error adding ICE candidate from ${fromUserId}:`, error);
         }
@@ -201,9 +200,8 @@ const useWebRTC = (roomId, userId, participants) => {
     };
   }, [localStream, roomId, createPeerConnection]);
 
-  // ==========================================
-  // 5️⃣ HANDLE NEW PARTICIPANTS
-  // ==========================================
+  //  HANDLE NEW PARTICIPANTS
+
   useEffect(() => {
     if (!localStream || !participants.length) return;
 
@@ -217,9 +215,7 @@ const useWebRTC = (roomId, userId, participants) => {
     });
   }, [participants, localStream, userId, callPeer]);
 
-  // ==========================================
-  // 6️⃣ TOGGLE VIDEO
-  // ==========================================
+  //  TOGGLE VIDEO
   const toggleVideo = useCallback(() => {
     if (localStream) {
       const videoTrack = localStream.getVideoTracks()[0];
@@ -234,9 +230,9 @@ const useWebRTC = (roomId, userId, participants) => {
     }
   }, [localStream, roomId]);
 
-  // ==========================================
-  // 7️⃣ TOGGLE AUDIO
-  // ==========================================
+
+  // TOGGLE AUDIO
+
   const toggleAudio = useCallback(() => {
     if (localStream) {
       const audioTrack = localStream.getAudioTracks()[0];

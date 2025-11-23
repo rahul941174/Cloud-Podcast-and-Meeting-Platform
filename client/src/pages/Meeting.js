@@ -3,6 +3,7 @@ import api from '../api';
 import { socket } from '../socket.js';
 import ChatBox from "../components/ChatBox";
 import useWebRTC from '../hooks/useWebRTC';
+import useRecording from '../hooks/useRecording';  // ← NEW
 import VideoGrid from '../components/VideoGrid';
 import MediaControls from '../components/MediaControls';
 
@@ -16,7 +17,7 @@ const Meeting = () => {
     const [hostId, setHostId] = useState(null);
     const [socketConnected, setSocketConnected] = useState(false);
 
-    // 🎥 WebRTC Hook
+    // 🎥 WebRTC Hook (existing)
     const {
         localStream,
         remoteStreams,
@@ -25,9 +26,23 @@ const Meeting = () => {
         toggleVideo,
         toggleAudio
     } = useWebRTC(
-        joined ? meetingId : null,  // Only activate WebRTC when joined
+        joined ? meetingId : null,
         user?._id || user?.id,
         participants
+    );
+
+    // 🎬 NEW: Recording Hook
+    const {
+        isRecording,
+        recordingError,
+        stats,
+        startRecording,
+        stopRecording,
+        downloadLocalRecording
+    } = useRecording(
+        localStream,              // Pass the video stream
+        meetingId,                // Pass room ID
+        user?._id || user?.id     // Pass user ID
     );
 
     // Fetch current user
@@ -74,7 +89,7 @@ const Meeting = () => {
         };
     }, []);
 
-    // Socket listeners
+    // Socket listeners (existing + NEW recording events)
     useEffect(() => {
         if (!user) return;
 
@@ -133,6 +148,32 @@ const Meeting = () => {
             alert(data.message || "An error occurred");
         });
 
+        // ==========================================
+        // 🎬 NEW: Recording Socket Events
+        // ==========================================
+        
+        socket.on("recording-started", (data) => {
+            console.log("🎬 Host started recording:", data);
+            
+            // All participants start recording their own video
+            if (!isRecording) {
+                startRecording();
+            }
+            
+            setMsg("🔴 Recording started by host");
+        });
+
+        socket.on("recording-stopped", (data) => {
+            console.log("🛑 Host stopped recording:", data);
+            
+            // All participants stop recording
+            if (isRecording) {
+                stopRecording();
+            }
+            
+            setMsg("⏹️ Recording stopped by host");
+        });
+
         return () => {
             socket.off("joined-success");
             socket.off("participants-updated");
@@ -142,8 +183,10 @@ const Meeting = () => {
             socket.off("meeting-ended");
             socket.off("join-error");
             socket.off("error");
+            socket.off("recording-started");  // ← NEW
+            socket.off("recording-stopped");  // ← NEW
         };
-    }, [user]);
+    }, [user, isRecording, startRecording, stopRecording]);
 
     const handleCreateMeeting = async () => {
         if (!user) {
@@ -165,6 +208,7 @@ const Meeting = () => {
             const returnedRoomId = res.data.meeting.roomId;
             console.log("✅ Meeting created:", returnedRoomId);
             
+            handleJoinMeeting(returnedRoomId);
             setCreatedRoom(returnedRoomId);
             setMeetingId(returnedRoomId);
             setMsg(`Meeting created — Room ID: ${returnedRoomId}. Click "Join Meeting" to enter.`);
@@ -228,6 +272,11 @@ const Meeting = () => {
     const handleLeaveMeeting = () => {
         if (!meetingId || !user) return;
 
+        // Stop recording if active
+        if (isRecording) {
+            stopRecording();
+        }
+
         const userId = (user._id || user.id).toString();
         console.log("🚪 Leaving meeting:", { roomId: meetingId, userId });
 
@@ -236,6 +285,8 @@ const Meeting = () => {
             userId: userId,
         });
 
+
+
         setJoined(false);
         setParticipants([]);
         setHostId(null);
@@ -243,11 +294,28 @@ const Meeting = () => {
         localStorage.removeItem("currentRoomId");
     };
 
-    const handleEndMeeting = () => {
+    const handleEndMeeting = async () => {
         if (!meetingId || !user) return;
+
+        // Stop recording if active
+        if (isRecording) {
+            handleStopRecording();
+        }
 
         const userId = (user._id || user.id).toString();
         console.log("🛑 Ending meeting:", { roomId: meetingId, hostId: userId });
+
+        try {
+            const response = await api.post(
+                `/meetings/end/${meetingId}`,
+                {},
+                { withCredentials: true }
+            );
+
+            console.log(response);
+        } catch (error) {
+            console.log("error in ending meeting", error);
+        }
 
         socket.emit("end-meeting", {
             roomId: meetingId,
@@ -261,10 +329,120 @@ const Meeting = () => {
         localStorage.removeItem("currentRoomId");
     };
 
+    // ==========================================
+    // 🎬 NEW: Recording Control Handlers
+    // ==========================================
+    
+    const handleStartRecording = () => {
+        if (!localStream) {
+            alert("Please wait for camera to initialize");
+            return;
+        }
+
+        if (isRecording) {
+            alert("Already recording");
+            return;
+        }
+
+        console.log("🎬 Host starting recording for all participants");
+
+        // Emit socket event to start recording for everyone
+        socket.emit("start-recording", {
+            roomId: meetingId,
+            hostId: user._id || user.id
+        });
+
+        // Start recording locally (host also records)
+        startRecording();
+        
+        setMsg("🔴 Recording started");
+    };
+
+    const handleStopRecording = () => {
+        if (!isRecording) {
+            alert("No active recording");
+            return;
+        }
+
+        console.log("🛑 Host stopping recording for all participants");
+
+        // Emit socket event to stop recording for everyone
+        socket.emit("stop-recording", {
+            roomId: meetingId,
+            hostId: user._id || user.id
+        });
+
+        
+        setMsg("⏹️ Recording stopped");
+    };
+
+    const handleMergeRecording = async () => {
+        if (!meetingId) {
+            alert("No meeting ID");
+            return;
+        }
+        
+        const confirmMerge = window.confirm(
+            "This will merge all recordings into one video. Continue?"
+        );
+        
+        if (!confirmMerge) return;
+        
+        try {
+            setMsg("⏳ Merging recordings... This may take a few minutes.");
+            
+            console.log("🎬 Triggering merge for meeting:", meetingId);
+            
+            const response = await api.post(`/recordings/merge/${meetingId}`);
+            
+            console.log("✅ Merge response:", response.data);
+            
+            setMsg(`✅ Recording merged successfully! Size: ${response.data.fileSizeMB} MB`);
+            
+            // Show download option
+            alert(`Recording ready! Click "Download Recording" to save it.`);
+            
+        } catch (error) {
+            console.error("❌ Merge error:", error);
+            setMsg("❌ Error merging recording");
+            alert("Error merging recording: " + (error.response?.data?.message || error.message));
+        }
+    };
+
+    const handleDownloadRecording = async () => {
+        if (!meetingId) {
+            alert("No meeting ID");
+            return;
+        }
+        
+        try {
+            setMsg("⏳ Downloading recording...");
+            
+            // Create download link
+            const downloadUrl = `${process.env.REACT_APP_BACKEND_URL || 'http://localhost:5000'}/api/recordings/download/${meetingId}`;
+            
+            // Open in new tab to trigger download
+            window.open(downloadUrl, '_blank');
+            
+            setMsg("✅ Download started!");
+            
+        } catch (error) {
+            console.error("❌ Download error:", error);
+            setMsg("❌ Error downloading recording");
+        }
+    };
+
     const isHost = user && hostId && (
         (user._id?.toString() === hostId.toString()) ||
         (user.id?.toString() === hostId.toString())
     );
+
+    // Format duration as MM:SS
+    const formatDuration = (seconds) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+    };
 
     return (
         <div style={{ padding: "20px", maxWidth: "1400px", margin: "0 auto" }}>
@@ -287,7 +465,20 @@ const Meeting = () => {
                 Room ID: {meetingId || "None"}<br />
                 Participants: {participants.length}<br />
                 Video: {isVideoEnabled ? "🟢 On" : "🔴 Off"} | 
-                Audio: {isAudioEnabled ? "🟢 On" : "🔴 Off"}
+                Audio: {isAudioEnabled ? "🟢 On" : "🔴 Off"}<br />
+                
+                {/* NEW: Recording Status */}
+                <strong>Recording:</strong> {isRecording ? "🔴 Active" : "⚫ Inactive"}<br />
+                {isRecording && (
+                    <>
+                        Duration: {formatDuration(stats.recordingDuration)}<br />
+                        Chunks: {stats.chunksRecorded} recorded, {stats.chunksUploaded} uploaded<br />
+                        Size: {(stats.totalSize / 1024 / 1024).toFixed(2)} MB
+                    </>
+                )}
+                {recordingError && (
+                    <span style={{ color: 'red' }}>Error: {recordingError}</span>
+                )}
             </div>
 
             <p style={{ 
@@ -383,6 +574,94 @@ const Meeting = () => {
                         onToggleAudio={toggleAudio}
                     />
 
+                    {/* ==========================================
+                        🎬 NEW: RECORDING CONTROLS (Host Only)
+                        ========================================== */}
+                    {isHost && (
+                        <div style={{
+                            display: 'flex',
+                            gap: '10px',
+                            justifyContent: 'center',
+                            alignItems: 'center',
+                            padding: '15px',
+                            backgroundColor: '#fff3cd',
+                            borderRadius: '8px',
+                            boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+                            marginBottom: '20px'
+                        }}>
+                            {!isRecording ? (
+                                <button
+                                    onClick={handleStartRecording}
+                                    disabled={!localStream}
+                                    style={{
+                                        padding: '12px 24px',
+                                        fontSize: '16px',
+                                        fontWeight: '600',
+                                        backgroundColor: '#dc3545',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '6px',
+                                        cursor: localStream ? 'pointer' : 'not-allowed',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px'
+                                    }}
+                                >
+                                    <span>🔴</span>
+                                    <span>Start Recording</span>
+                                </button>
+                            ) : (
+                                <>
+                                    <button
+                                        onClick={handleStopRecording}
+                                        style={{
+                                            padding: '12px 24px',
+                                            fontSize: '16px',
+                                            fontWeight: '600',
+                                            backgroundColor: '#6c757d',
+                                            color: 'white',
+                                            border: 'none',
+                                            borderRadius: '6px',
+                                            cursor: 'pointer',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px'
+                                        }}
+                                    >
+                                        <span>⏹️</span>
+                                        <span>Stop Recording</span>
+                                    </button>
+                                    
+                                    <div style={{
+                                        padding: '8px 16px',
+                                        backgroundColor: '#fff',
+                                        borderRadius: '6px',
+                                        fontSize: '14px',
+                                        border: '2px solid #dc3545'
+                                    }}>
+                                        <span style={{ color: '#dc3545', fontWeight: 'bold' }}>●</span>
+                                        {' '}Recording: {formatDuration(stats.recordingDuration)}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Recording Status for Non-Host */}
+                    {!isHost && isRecording && (
+                        <div style={{
+                            padding: '10px',
+                            backgroundColor: '#ffe6e6',
+                            borderRadius: '6px',
+                            textAlign: 'center',
+                            marginBottom: '20px',
+                            fontSize: '14px'
+                        }}>
+                            <span style={{ color: '#dc3545', fontWeight: 'bold' }}>● REC</span>
+                            {' '}This meeting is being recorded
+                        </div>
+                    )}
+
                     {/* 👥 PARTICIPANTS LIST */}
                     <div style={{ 
                         margin: "20px auto", 
@@ -423,19 +702,82 @@ const Meeting = () => {
                         </button>
 
                         {isHost && (
-                            <button
-                                onClick={handleEndMeeting}
-                                style={{
-                                    padding: "10px 20px",
-                                    backgroundColor: "#dc3545",
-                                    color: "white",
-                                    border: "none",
-                                    borderRadius: "4px",
-                                    cursor: "pointer"
-                                }}
-                            >
-                                🛑 End Meeting (Host)
-                            </button>
+                            <>
+                                <button
+                                    onClick={handleEndMeeting}
+                                    style={{
+                                        padding: "10px 20px",
+                                        backgroundColor: "#dc3545",
+                                        color: "white",
+                                        border: "none",
+                                        borderRadius: "4px",
+                                        cursor: "pointer",
+                                        marginRight: "10px"
+                                    }}
+                                >
+                                    🛑 End Meeting (Host)
+                                </button>
+                                
+                                {/* Download backup button */}
+                                {stats.chunksRecorded > 0 && (
+                                    <button
+                                        onClick={downloadLocalRecording}
+                                        style={{
+                                            padding: "10px 20px",
+                                            backgroundColor: "#28a745",
+                                            color: "white",
+                                            border: "none",
+                                            borderRadius: "4px",
+                                            cursor: "pointer"
+                                        }}
+                                    >
+                                        💾 Download Local Backup
+                                    </button>
+                                )}
+                            </>
+                        )}
+                        {isHost && stats.chunksRecorded > 0 && !isRecording && (
+                            <div style={{
+                                display: 'flex',
+                                gap: '10px',
+                                justifyContent: 'center',
+                                padding: '15px',
+                                backgroundColor: '#d4edda',
+                                borderRadius: '8px',
+                                marginBottom: '20px'
+                            }}>
+                                <button
+                                    onClick={handleMergeRecording}
+                                    style={{
+                                        padding: '12px 24px',
+                                        fontSize: '16px',
+                                        fontWeight: '600',
+                                        backgroundColor: '#28a745',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '6px',
+                                        cursor: 'pointer'
+                                    }}
+                                >
+                                    🎬 Merge Recordings
+                                </button>
+                                
+                                <button
+                                    onClick={handleDownloadRecording}
+                                    style={{
+                                        padding: '12px 24px',
+                                        fontSize: '16px',
+                                        fontWeight: '600',
+                                        backgroundColor: '#007bff',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '6px',
+                                        cursor: 'pointer'
+                                    }}
+                                >
+                                    📥 Download Recording
+                                </button>
+                            </div>
                         )}
                     </div>
                 </>

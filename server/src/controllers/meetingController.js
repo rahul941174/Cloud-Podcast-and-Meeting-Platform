@@ -17,7 +17,7 @@ export const createMeeting = async (req, res) => {
 
         const roomId = uuidv4();
 
-        // 🔥 DON'T add host to participants here
+        // DON'T add host to participants here
         // Let socket handle it when they join
         const meeting = new Meeting({
             roomId,
@@ -68,7 +68,7 @@ export const joinMeeting = async (req, res) => {
             });
         }
 
-        // 🔥 DON'T add participant here - let socket handle it
+        //  DON'T add participant here - let socket handle it
         // Just verify the meeting is valid
         const isAlreadyParticipant = meeting.participants.some(
             p => p.user.toString() === userId
@@ -125,4 +125,41 @@ export const getMeetingDetails = async (req, res) => {
             error: error.message
         });
     }
+};
+
+
+export const endMeeting=async(req,res)=>{
+    try{
+
+        const { roomId } = req.params;
+
+        if (!roomId) {
+            return res.status(400).json({
+                message: 'roomId is required to fetch meeting details'
+            });
+        }
+
+        const meeting = await Meeting.findOne({ roomId });
+        if (!meeting) {
+            return res.status(404).json({
+                message: 'Meeting not found with such roomId'
+            });
+        }
+
+        meeting.isActive=false;
+
+        await meeting.save();
+
+        res.status(200).json({
+            message: 'Meeting acive set false successfully'
+        });
+
+
+    }
+    catch(error){
+        res.status(500).json({
+            message: 'Error in ending meeting',
+            error: error.message
+        });
+    }   
 };
