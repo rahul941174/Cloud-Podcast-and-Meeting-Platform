@@ -3,7 +3,7 @@ import api from '../api';
 import { socket } from '../socket.js';
 import ChatBox from "../components/ChatBox";
 import useWebRTC from '../hooks/useWebRTC';
-import useRecording from '../hooks/useRecording';  // ← NEW
+import useRecording from '../hooks/useRecording';
 import VideoGrid from '../components/VideoGrid';
 import MediaControls from '../components/MediaControls';
 
@@ -17,12 +17,13 @@ const Meeting = () => {
     const [hostId, setHostId] = useState(null);
     const [socketConnected, setSocketConnected] = useState(false);
 
-    // 🎥 WebRTC Hook (existing)
+    // 🎥 WebRTC Hook (now with connectionStatus!)
     const {
         localStream,
         remoteStreams,
         isVideoEnabled,
         isAudioEnabled,
+        connectionStatus,  // ← NEW!
         toggleVideo,
         toggleAudio
     } = useWebRTC(
@@ -31,7 +32,7 @@ const Meeting = () => {
         participants
     );
 
-    // 🎬 NEW: Recording Hook
+    // 🎬 Recording Hook
     const {
         isRecording,
         recordingError,
@@ -40,9 +41,9 @@ const Meeting = () => {
         stopRecording,
         downloadLocalRecording
     } = useRecording(
-        localStream,              // Pass the video stream
-        meetingId,                // Pass room ID
-        user?._id || user?.id     // Pass user ID
+        localStream,
+        meetingId,
+        user?._id || user?.id
     );
 
     // Fetch current user
@@ -89,7 +90,7 @@ const Meeting = () => {
         };
     }, []);
 
-    // Socket listeners (existing + NEW recording events)
+    // Socket listeners
     useEffect(() => {
         if (!user) return;
 
@@ -148,29 +149,20 @@ const Meeting = () => {
             alert(data.message || "An error occurred");
         });
 
-        // ==========================================
-        // 🎬 NEW: Recording Socket Events
-        // ==========================================
-        
+        // Recording events
         socket.on("recording-started", (data) => {
             console.log("🎬 Host started recording:", data);
-            
-            // All participants start recording their own video
             if (!isRecording) {
                 startRecording();
             }
-            
             setMsg("🔴 Recording started by host");
         });
 
         socket.on("recording-stopped", (data) => {
             console.log("🛑 Host stopped recording:", data);
-            
-            // All participants stop recording
             if (isRecording) {
                 stopRecording();
             }
-            
             setMsg("⏹️ Recording stopped by host");
         });
 
@@ -183,8 +175,8 @@ const Meeting = () => {
             socket.off("meeting-ended");
             socket.off("join-error");
             socket.off("error");
-            socket.off("recording-started");  // ← NEW
-            socket.off("recording-stopped");  // ← NEW
+            socket.off("recording-started");
+            socket.off("recording-stopped");
         };
     }, [user, isRecording, startRecording, stopRecording]);
 
@@ -272,7 +264,6 @@ const Meeting = () => {
     const handleLeaveMeeting = () => {
         if (!meetingId || !user) return;
 
-        // Stop recording if active
         if (isRecording) {
             stopRecording();
         }
@@ -285,8 +276,6 @@ const Meeting = () => {
             userId: userId,
         });
 
-
-
         setJoined(false);
         setParticipants([]);
         setHostId(null);
@@ -297,7 +286,6 @@ const Meeting = () => {
     const handleEndMeeting = async () => {
         if (!meetingId || !user) return;
 
-        // Stop recording if active
         if (isRecording) {
             handleStopRecording();
         }
@@ -306,13 +294,11 @@ const Meeting = () => {
         console.log("🛑 Ending meeting:", { roomId: meetingId, hostId: userId });
 
         try {
-            const response = await api.post(
+            await api.post(
                 `/meetings/end/${meetingId}`,
                 {},
                 { withCredentials: true }
             );
-
-            console.log(response);
         } catch (error) {
             console.log("error in ending meeting", error);
         }
@@ -329,10 +315,7 @@ const Meeting = () => {
         localStorage.removeItem("currentRoomId");
     };
 
-    // ==========================================
-    // 🎬 NEW: Recording Control Handlers
-    // ==========================================
-    
+    // Recording handlers
     const handleStartRecording = () => {
         if (!localStream) {
             alert("Please wait for camera to initialize");
@@ -346,15 +329,12 @@ const Meeting = () => {
 
         console.log("🎬 Host starting recording for all participants");
 
-        // Emit socket event to start recording for everyone
         socket.emit("start-recording", {
             roomId: meetingId,
             hostId: user._id || user.id
         });
 
-        // Start recording locally (host also records)
         startRecording();
-        
         setMsg("🔴 Recording started");
     };
 
@@ -366,13 +346,11 @@ const Meeting = () => {
 
         console.log("🛑 Host stopping recording for all participants");
 
-        // Emit socket event to stop recording for everyone
         socket.emit("stop-recording", {
             roomId: meetingId,
             hostId: user._id || user.id
         });
 
-        
         setMsg("⏹️ Recording stopped");
     };
 
@@ -399,7 +377,6 @@ const Meeting = () => {
             
             setMsg(`✅ Recording merged successfully! Size: ${response.data.fileSizeMB} MB`);
             
-            // Show download option
             alert(`Recording ready! Click "Download Recording" to save it.`);
             
         } catch (error) {
@@ -418,10 +395,10 @@ const Meeting = () => {
             const token = localStorage.getItem("token");
 
             const res = await fetch(
-            `${process.env.REACT_APP_BACKEND_URL}/api/recordings/download/${meetingId}`,
-            {
-                headers: { Authorization: `Bearer ${token}` }
-            }
+                `${process.env.REACT_APP_BACKEND_URL}/api/recordings/download/${meetingId}`,
+                {
+                    headers: { Authorization: `Bearer ${token}` }
+                }
             );
 
             if (!res.ok) throw new Error("Download failed");
@@ -429,7 +406,6 @@ const Meeting = () => {
             const blob = await res.blob();
             const url = window.URL.createObjectURL(blob);
             
-            // auto trigger download
             const a = document.createElement("a");
             a.href = url;
             a.download = `recording-${meetingId}.mp4`;
@@ -445,18 +421,36 @@ const Meeting = () => {
         }
     };
 
-
     const isHost = user && hostId && (
         (user._id?.toString() === hostId.toString()) ||
         (user.id?.toString() === hostId.toString())
     );
 
-    // Format duration as MM:SS
     const formatDuration = (seconds) => {
         const mins = Math.floor(seconds / 60);
         const secs = seconds % 60;
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     };
+
+    // ==========================================
+    // 🎨 Connection Status Display Helper
+    // ==========================================
+    const getConnectionStatusDisplay = () => {
+        switch(connectionStatus) {
+            case 'connected':
+                return { icon: '🟢', text: 'Connected', color: '#4CAF50' };
+            case 'connecting':
+                return { icon: '🟡', text: 'Connecting...', color: '#FFC107' };
+            case 'ready':
+                return { icon: '🔵', text: 'Ready', color: '#2196F3' };
+            case 'error':
+                return { icon: '🔴', text: 'Error', color: '#F44336' };
+            default:
+                return { icon: '⚪', text: 'Disconnected', color: '#9E9E9E' };
+        }
+    };
+
+    const statusDisplay = getConnectionStatusDisplay();
 
     return (
         <div style={{ padding: "20px", maxWidth: "1400px", margin: "0 auto" }}>
@@ -478,10 +472,21 @@ const Meeting = () => {
                 Joined: {joined ? "✅ Yes" : "❌ No"}<br />
                 Room ID: {meetingId || "None"}<br />
                 Participants: {participants.length}<br />
+                
+                {/* NEW: WebRTC Connection Status */}
+                <span 
+                    style={{ 
+                        color: statusDisplay.color, 
+                        fontWeight: 'bold' 
+                    }}
+                >
+                    WebRTC: {statusDisplay.icon} {statusDisplay.text}
+                </span><br />
+                
                 Video: {isVideoEnabled ? "🟢 On" : "🔴 Off"} | 
                 Audio: {isAudioEnabled ? "🟢 On" : "🔴 Off"}<br />
                 
-                {/* NEW: Recording Status */}
+                {/* Recording Status */}
                 <strong>Recording:</strong> {isRecording ? "🔴 Active" : "⚫ Inactive"}<br />
                 {isRecording && (
                     <>
@@ -497,7 +502,7 @@ const Meeting = () => {
 
             <p style={{ 
                 textAlign: "center", 
-                color: msg.includes("Error") ? "red" : "black" 
+                color: msg.includes("Error") || msg.includes("❌") ? "red" : "black" 
             }}>{msg}</p>
 
             {!joined ? (
@@ -572,7 +577,24 @@ const Meeting = () => {
                 <>
                     <h3 style={{ textAlign: "center" }}>📍 Meeting Room: {meetingId}</h3>
 
-                    {/* 🎥 VIDEO SECTION */}
+                    {/* Connection Status Banner */}
+                    {connectionStatus !== 'connected' && (
+                        <div style={{
+                            padding: '10px',
+                            backgroundColor: statusDisplay.color + '20',
+                            border: `2px solid ${statusDisplay.color}`,
+                            borderRadius: '6px',
+                            textAlign: 'center',
+                            marginBottom: '20px',
+                            fontSize: '14px',
+                            fontWeight: '600'
+                        }}>
+                            {statusDisplay.icon} {statusDisplay.text}
+                            {connectionStatus === 'connecting' && ' - Please wait...'}
+                        </div>
+                    )}
+
+                    {/* VIDEO SECTION */}
                     <VideoGrid
                         localStream={localStream}
                         remoteStreams={remoteStreams}
@@ -580,7 +602,7 @@ const Meeting = () => {
                         currentUserId={user?._id || user?.id}
                     />
 
-                    {/* 🎛️ MEDIA CONTROLS */}
+                    {/* MEDIA CONTROLS */}
                     <MediaControls
                         isVideoEnabled={isVideoEnabled}
                         isAudioEnabled={isAudioEnabled}
@@ -588,9 +610,7 @@ const Meeting = () => {
                         onToggleAudio={toggleAudio}
                     />
 
-                    {/* ==========================================
-                        🎬 NEW: RECORDING CONTROLS (Host Only)
-                        ========================================== */}
+                    {/* RECORDING CONTROLS (Host Only) */}
                     {isHost && (
                         <div style={{
                             display: 'flex',
@@ -676,7 +696,7 @@ const Meeting = () => {
                         </div>
                     )}
 
-                    {/* 👥 PARTICIPANTS LIST */}
+                    {/* PARTICIPANTS LIST */}
                     <div style={{ 
                         margin: "20px auto", 
                         maxWidth: "400px",
@@ -699,10 +719,10 @@ const Meeting = () => {
                         </ul>
                     </div>
 
-                    {/* 💬 CHAT BOX */}
+                    {/* CHAT BOX */}
                     <ChatBox roomId={meetingId} user={user} />
 
-                    {/* 🚪 MEETING CONTROLS */}
+                    {/* MEETING CONTROLS */}
                     <div style={{ marginTop: 20, textAlign: "center" }}>
                         <button 
                             onClick={handleLeaveMeeting}
@@ -732,7 +752,6 @@ const Meeting = () => {
                                     🛑 End Meeting (Host)
                                 </button>
                                 
-                                {/* Download backup button */}
                                 {stats.chunksRecorded > 0 && (
                                     <button
                                         onClick={downloadLocalRecording}
@@ -750,6 +769,7 @@ const Meeting = () => {
                                 )}
                             </>
                         )}
+
                         {isHost && stats.chunksRecorded > 0 && !isRecording && (
                             <div style={{
                                 display: 'flex',
@@ -758,7 +778,7 @@ const Meeting = () => {
                                 padding: '15px',
                                 backgroundColor: '#d4edda',
                                 borderRadius: '8px',
-                                marginBottom: '20px'
+                                marginTop: '20px'
                             }}>
                                 <button
                                     onClick={handleMergeRecording}

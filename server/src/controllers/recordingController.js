@@ -1,150 +1,198 @@
-import fs from "fs";
-import path from "path";
-import ffmpeg from "fluent-ffmpeg";
-import { fileURLToPath } from "url";
+import { saveChunk } from '../utils/fileHelper.js';
+import { getMeetingDir } from '../utils/fileHelper.js';
+import fs from 'fs';
+import path from 'path';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const BASE_DIR = path.join(__dirname, "../uploads/recordings");
-const OUTPUT_DIR = path.join(__dirname, "../uploads/final");
-
-// Ensure output folder exists
-if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-
-
-// ---------------------------
-//  FIX #2 — NORMALIZE VIDEO
-// ---------------------------
-const normalizeVideo = (input, output) => {
-  return new Promise((resolve, reject) => {
-    ffmpeg(input)
-      .outputOptions([
-        '-vf scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2',
-        '-r 30',
-        '-c:v libvpx-vp9',
-        '-b:v 1M',
-        '-ac 2'
-      ])
-      .on("end", () => resolve(output))
-      .on("error", reject)
-      .save(output);
-  });
-};
-
-
-// ---------------------------
-//   CONCAT USER CHUNKS
-// ---------------------------
-const concatChunks = async (folderPath, outputFile) => {
-  const files = fs.readdirSync(folderPath).filter(f => f.endsWith(".webm"));
-
-  files.sort((a, b) => {
-    const numA = parseInt(a.split("_")[1]);
-    const numB = parseInt(b.split("_")[1]);
-    return numA - numB;
-  });
-
-  if (files.length === 1) {
-    // No need to concat, just copy
-    fs.copyFileSync(path.join(folderPath, files[0]), outputFile);
-    return outputFile;
-  }
-
-  const concatList = path.join(folderPath, "concat.txt");
-  fs.writeFileSync(concatList, files.map(f => `file '${path.join(folderPath, f)}'`).join("\n"));
-
-  return new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(concatList)
-      .inputOptions(['-f concat', '-safe 0'])
-      .outputOptions(['-c copy'])
-      .on("end", () => resolve(outputFile))
-      .on("error", reject)
-      .save(outputFile);
-  });
-};
-
-
-// ---------------------------
-//  FIX #3 — MERGE FINAL MP4
-// ---------------------------
-const mergeFinalVideo = async (videos, outputFile) => {
-  return new Promise((resolve, reject) => {
-    const command = ffmpeg();
-
-    videos.forEach(v => command.input(v));
-
-    command
-      .complexFilter(`hstack=inputs=${videos.length}`)
-      .outputOptions([
-        "-c:v libx264",
-        "-preset veryfast",
-        "-crf 23",
-        "-pix_fmt yuv420p"
-      ])
-      .on("end", () => resolve(outputFile))
-      .on("error", reject)
-      .save(outputFile);
-  });
-};
-
-
-// ---------------------------
-//  FIX #4 — CLEANUP
-// ---------------------------
-const cleanupChunks = (roomPath) => {
-  try {
-    fs.rmSync(roomPath, { recursive: true, force: true });
-    console.log(`🧹 Cleaned temporary chunks in ${roomPath}`);
-  } catch (err) {
-    console.error("Cleanup failed:", err);
-  }
-};
-
-
-// ---------------------------
-//   MAIN MERGE HANDLER
-// ---------------------------
-export const mergeRecording = async (req, res) => {
-  const { roomId } = req.body;
-
-  try {
-    const roomPath = path.join(BASE_DIR, roomId);
-    const users = fs.readdirSync(roomPath);
-
-    const normalizedVideos = [];
-
-    for (const userId of users) {
-      const userDir = path.join(roomPath, userId);
-
-      const rawOutput = path.join(userDir, "combined.webm");
-      const normalizedOutput = path.join(userDir, "normalized.webm");
-
-      // 1️⃣ Combine chunks
-      await concatChunks(userDir, rawOutput);
-
-      // 2️⃣ Normalize video for merge
-      await normalizeVideo(rawOutput, normalizedOutput);
-
-      normalizedVideos.push(normalizedOutput);
+/**
+ * Upload a recording chunk
+ */
+export const uploadChunk = async (req, res) => {
+    try {
+        console.log(`\n🔍 CONTROLLER RECEIVED:`);
+        console.log(`   roomId: ${req.body.roomId}`);
+        console.log(`   userId: ${req.body.userId}`);
+        console.log(`   chunkIndex: ${req.body.chunkIndex}`);
+        console.log(`   chunkData length: ${req.body.chunkData?.length}\n`);
+        
+        const { roomId, userId, chunkIndex, chunkData } = req.body;
+        
+        // Validate required fields
+        if (!roomId || !userId || chunkIndex === undefined) {
+            return res.status(400).json({
+                message: 'Missing required fields: roomId, userId, or chunkIndex'
+            });
+        }
+        
+        if (!chunkData) {
+            return res.status(400).json({
+                message: 'No chunk data provided'
+            });
+        }
+        
+        console.log(`📥 Receiving chunk ${chunkIndex} from user ${userId}`);
+        console.log(`   Base64 length: ${chunkData.length} chars`);
+        
+        // Convert base64 to buffer
+        let buffer;
+        try {
+            buffer = Buffer.from(chunkData, 'base64');
+        } catch (error) {
+            console.error('❌ Invalid base64 data:', error);
+            return res.status(400).json({
+                message: 'Invalid chunk data format'
+            });
+        }
+        
+        // Verify buffer size (must be at least 1KB)
+        if (buffer.length < 1000) {
+            console.error(`❌ Suspiciously small buffer: ${buffer.length} bytes`);
+            return res.status(400).json({
+                message: 'Chunk data too small - possible corruption',
+                receivedSize: buffer.length
+            });
+        }
+        
+        console.log(`✅ Valid chunk: ${buffer.length} bytes (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
+        
+        // Save chunk to disk
+        const result = await saveChunk(roomId, userId, chunkIndex, buffer);
+        
+        // Verify file was saved correctly
+        const savedSize = fs.statSync(result.filepath).size;
+        
+        if (savedSize !== buffer.length) {
+            console.error(`⚠️ Size mismatch! Buffer: ${buffer.length}, Saved: ${savedSize}`);
+            return res.status(500).json({
+                message: 'File save verification failed - size mismatch',
+                expected: buffer.length,
+                actual: savedSize
+            });
+        }
+        
+        if (savedSize < 1000) {
+            console.error(`⚠️ CORRUPT CHUNK DETECTED: ${savedSize} bytes`);
+            
+            try {
+                fs.unlinkSync(result.filepath);
+                console.log(`🗑️ Deleted corrupt chunk file`);
+            } catch (e) {
+                console.error('Failed to delete corrupt file:', e);
+            }
+            
+            return res.status(400).json({
+                message: 'Chunk appears corrupted (too small)',
+                receivedSize: savedSize
+            });
+        }
+        
+        console.log(`✅ Chunk ${chunkIndex} saved and verified: ${savedSize} bytes (${(savedSize / 1024 / 1024).toFixed(2)} MB)`);
+        console.log(`   Saved as: ${result.filename}\n`);
+        
+        // Return success
+        res.status(200).json({
+            message: 'Chunk uploaded successfully',
+            chunkIndex,
+            size: savedSize,
+            sizeMB: (savedSize / 1024 / 1024).toFixed(2),
+            filename: result.filename,
+            ...result
+        });
+        
+    } catch (error) {
+        console.error('❌ Error uploading chunk:', error);
+        res.status(500).json({
+            message: 'Error uploading chunk',
+            error: error.message
+        });
     }
+};
 
-    // 3️⃣ Merge into side-by-side mp4
-    const finalOutputPath = path.join(
-      OUTPUT_DIR,
-      `${roomId}_final_${Date.now()}.mp4`
-    );
-
-    await mergeFinalVideo(normalizedVideos, finalOutputPath);
-
-    // 4️⃣ Cleanup original chunks
-    cleanupChunks(roomPath);
-
-    res.json({ success: true, file: finalOutputPath });
-
-  } catch (error) {
-    console.error("❌ Merge error:", error);
-    res.status(500).json({ error: "Failed to merge video", details: error.message });
-  }
+/**
+ * Get recording status for a meeting
+ * Returns info about chunks uploaded and final video status
+ */
+export const getRecordingStatus = async (req, res) => {
+    try {
+        const { roomId } = req.params;
+        
+        if (!roomId) {
+            return res.status(400).json({
+                message: 'roomId is required'
+            });
+        }
+        
+        const meetingDir = getMeetingDir(roomId);
+        
+        // Check if directory exists
+        if (!fs.existsSync(meetingDir)) {
+            return res.status(404).json({
+                message: 'No recordings found for this meeting',
+                roomId,
+                hasRecording: false
+            });
+        }
+        
+        // Get all user directories
+        const items = fs.readdirSync(meetingDir);
+        const userDirs = items.filter(item => {
+            const itemPath = path.join(meetingDir, item);
+            return fs.statSync(itemPath).isDirectory();
+        });
+        
+        // Count chunks per user
+        const userChunks = {};
+        let totalChunks = 0;
+        let totalSize = 0;
+        
+        for (const userId of userDirs) {
+            const userDir = path.join(meetingDir, userId);
+            const chunks = fs.readdirSync(userDir).filter(f => f.endsWith('.webm'));
+            
+            userChunks[userId] = {
+                count: chunks.length,
+                chunks: chunks.sort()
+            };
+            
+            totalChunks += chunks.length;
+            
+            // Calculate total size
+            chunks.forEach(chunk => {
+                const chunkPath = path.join(userDir, chunk);
+                totalSize += fs.statSync(chunkPath).size;
+            });
+        }
+        
+        // Check if final video exists
+        const finalVideoPath = path.join(meetingDir, 'final-recording.mp4');
+        const hasFinalVideo = fs.existsSync(finalVideoPath);
+        
+        let finalVideoInfo = null;
+        if (hasFinalVideo) {
+            const stats = fs.statSync(finalVideoPath);
+            finalVideoInfo = {
+                size: stats.size,
+                sizeMB: (stats.size / 1024 / 1024).toFixed(2),
+                created: stats.birthtime
+            };
+        }
+        
+        res.status(200).json({
+            message: 'Recording status retrieved',
+            roomId,
+            hasRecording: totalChunks > 0 || hasFinalVideo,
+            userCount: userDirs.length,
+            totalChunks,
+            totalSizeMB: (totalSize / 1024 / 1024).toFixed(2),
+            userChunks,
+            hasFinalVideo,
+            finalVideo: finalVideoInfo
+        });
+        
+    } catch (error) {
+        console.error('❌ Error getting recording status:', error);
+        res.status(500).json({
+            message: 'Error getting recording status',
+            error: error.message
+        });
+    }
 };
