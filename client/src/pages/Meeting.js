@@ -392,20 +392,13 @@ const Meeting = () => {
         try {
             setMsg("⏳ Downloading recording...");
 
-            const token = localStorage.getItem("token");
+            const response = await api.get(`/recordings/download/${meetingId}`, {
+                responseType: "blob", // 👈 required for video/mp4
+            });
 
-            const res = await fetch(
-                `${process.env.REACT_APP_BACKEND_URL}/api/recordings/download/${meetingId}`,
-                {
-                    headers: { Authorization: `Bearer ${token}` }
-                }
-            );
-
-            if (!res.ok) throw new Error("Download failed");
-
-            const blob = await res.blob();
+            const blob = new Blob([response.data], { type: "video/mp4" });
             const url = window.URL.createObjectURL(blob);
-            
+
             const a = document.createElement("a");
             a.href = url;
             a.download = `recording-${meetingId}.mp4`;
@@ -414,12 +407,13 @@ const Meeting = () => {
             a.remove();
 
             setMsg("✅ Download complete!");
-
         } catch (error) {
-            console.error(error);
+            console.error("❌ Download error:", error);
             setMsg("❌ Error downloading recording");
+            alert(error.response?.data?.message || error.message);
         }
     };
+
 
     const isHost = user && hostId && (
         (user._id?.toString() === hostId.toString()) ||

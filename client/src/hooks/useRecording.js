@@ -2,13 +2,9 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import api from '../api';
 
 /**
- * FIXED RECORDING HOOK - Consistent behavior
+ * WORKING SOLUTION - Stop/Restart Every 10s
  * 
- * Key fixes:
- * - Proper state management
- * - Consistent chunk timing
- * - Better error handling
- * - Cleanup on unmount
+ * Strategy: Stop → Upload → Restart to force WebM headers
  */
 
 const useRecording = (localStream, roomId, userId) => {
@@ -27,13 +23,13 @@ const useRecording = (localStream, roomId, userId) => {
     const uploadedCountRef = useRef(0);
     const recordingStartTimeRef = useRef(null);
     const durationIntervalRef = useRef(null);
-    const chunkTimeoutRef = useRef(null);
+    const chunkIntervalRef = useRef(null);
     const shouldContinueRecordingRef = useRef(false);
-    const isUploadingRef = useRef(false);
 
     // ==========================================
     // Convert Blob to Base64
     // ==========================================
+    
     const blobToBase64 = (blob) => {
         return new Promise((resolve, reject) => {
             if (!blob || blob.size === 0) {
@@ -63,63 +59,44 @@ const useRecording = (localStream, roomId, userId) => {
     };
 
     // ==========================================
-    // Upload blob to server with retry logic
+    // Upload blob to server
     // ==========================================
-    const uploadBlob = useCallback(async (blob, chunkIndex, retries = 3) => {
+    
+    const uploadBlob = useCallback(async (blob, chunkIndex) => {
         console.log(`\n📤 Uploading chunk ${chunkIndex}...`);
         console.log(`   Size: ${blob.size} bytes (${(blob.size / 1024 / 1024).toFixed(2)} MB)`);
         
-        for (let attempt = 1; attempt <= retries; attempt++) {
-            try {
-                const chunkData = await blobToBase64(blob);
-                
-                const response = await api.post('/recordings/upload-chunk', {
-                    roomId,
-                    userId,
-                    chunkIndex: chunkIndex,
-                    chunkData
-                }, {
-                    timeout: 60000, // 60 second timeout
-                });
-                
-                console.log(`✅ Chunk ${chunkIndex} uploaded successfully`);
-                
-                setStats(prev => ({
-                    ...prev,
-                    chunksUploaded: prev.chunksUploaded + 1
-                }));
-                
-                return response.data;
-                
-            } catch (error) {
-                console.error(`❌ Upload error chunk ${chunkIndex} (attempt ${attempt}/${retries}):`, error.message);
-                
-                if (attempt === retries) {
-                    throw error;
-                }
-                
-                // Wait before retry (exponential backoff)
-                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-            }
+        try {
+            const chunkData = await blobToBase64(blob);
+            
+            const response = await api.post('/recordings/upload-chunk', {
+                roomId,
+                userId,
+                chunkIndex: chunkIndex,
+                chunkData
+            });
+            
+            console.log(`✅ Chunk ${chunkIndex} uploaded successfully`);
+            
+            setStats(prev => ({
+                ...prev,
+                chunksUploaded: prev.chunksUploaded + 1
+            }));
+            
+            return response.data;
+            
+        } catch (error) {
+            console.error(`❌ Upload error chunk ${chunkIndex}:`, error);
+            throw error;
         }
     }, [roomId, userId]);
 
     // ==========================================
-    // Record a single chunk (10 seconds)
+    // Start a single chunk recording (10 seconds)
     // ==========================================
+    
     const recordSingleChunk = useCallback(() => {
-        return new Promise((resolve, reject) => {
-            if (!localStream) {
-                reject(new Error('No stream available'));
-                return;
-            }
-
-            if (isUploadingRef.current) {
-                console.log('⚠️ Upload in progress, waiting...');
-                setTimeout(() => resolve(), 1000);
-                return;
-            }
-
+        return new Promise((resolve) => {
             console.log(`\n🎬 Starting chunk ${uploadedCountRef.current}...`);
             
             // Reset chunk buffer
@@ -129,24 +106,20 @@ const useRecording = (localStream, roomId, userId) => {
             let mimeType = 'video/webm;codecs=vp8,opus';
             if (!MediaRecorder.isTypeSupported(mimeType)) {
                 mimeType = 'video/webm';
-                console.log('⚠️ Using fallback mimeType');
             }
             
             const recorder = new MediaRecorder(localStream, {
                 mimeType,
-                videoBitsPerSecond: 4000000,  // 4 Mbps
-                audioBitsPerSecond: 192000    // 192 kbps
+                videoBitsPerSecond: 4000000,  // 🔥 4 Mbps (was 2.5)
+                audioBitsPerSecond: 192000    // 🔥 192 kbps (was 128)
             });
             
             mediaRecorderRef.current = recorder;
             
-            let chunkCount = 0;
-            
-            // Collect data chunks
+            // Collect data
             recorder.ondataavailable = (event) => {
                 if (event.data && event.data.size > 0) {
-                    chunkCount++;
-                    console.log(`   📹 Data chunk ${chunkCount}: ${event.data.size} bytes`);
+                    console.log(`   📹 Data: ${event.data.size} bytes`);
                     recordedChunksRef.current.push(event.data);
                     
                     setStats(prev => ({
@@ -156,29 +129,16 @@ const useRecording = (localStream, roomId, userId) => {
                 }
             };
             
-            // When stopped, upload
+            // When stopped, upload and resolve
             recorder.onstop = async () => {
-                console.log(`   ⏹️ Chunk ${uploadedCountRef.current} stopped (${chunkCount} data chunks)`);
+                console.log(`   ⏹️ Chunk ${uploadedCountRef.current} stopped`);
                 
-                if (recordedChunksRef.current.length === 0) {
-                    console.error('❌ No data chunks recorded!');
-                    reject(new Error('No data recorded'));
-                    return;
-                }
-                
-                // Create complete blob
-                const blob = new Blob(recordedChunksRef.current, { type: mimeType });
-                console.log(`   📦 Blob size: ${blob.size} bytes`);
-                
-                if (blob.size < 1000) {
-                    console.error('❌ Blob too small, skipping');
-                    resolve();
-                    return;
-                }
-                
-                // Upload
-                isUploadingRef.current = true;
-                try {
+                if (recordedChunksRef.current.length > 0) {
+                    // Create complete blob
+                    const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+                    console.log(`   📦 Blob size: ${blob.size} bytes`);
+                    
+                    // Upload
                     await uploadBlob(blob, uploadedCountRef.current);
                     uploadedCountRef.current += 1;
                     
@@ -186,11 +146,6 @@ const useRecording = (localStream, roomId, userId) => {
                         ...prev,
                         chunksRecorded: prev.chunksRecorded + 1
                     }));
-                } catch (error) {
-                    console.error('❌ Upload failed:', error);
-                    setRecordingError(`Upload failed: ${error.message}`);
-                } finally {
-                    isUploadingRef.current = false;
                 }
                 
                 resolve();
@@ -198,43 +153,32 @@ const useRecording = (localStream, roomId, userId) => {
             
             recorder.onerror = (error) => {
                 console.error('❌ Recorder error:', error);
-                reject(error);
+                resolve();
             };
             
-            // Start recording
+            // 🔥 Start WITHOUT timeslice - record continuously
             recorder.start();
             
-            // Stop after exactly 10 seconds
-            chunkTimeoutRef.current = setTimeout(() => {
+            // 🔥 Stop after 10 seconds (slightly longer to compensate for restart delay)
+            setTimeout(() => {
                 if (recorder.state === 'recording') {
                     recorder.stop();
                 }
-            }, 10000); // Exactly 10 seconds
+            }, 10100); // 10.1 seconds instead of 10
         });
-    }, [localStream, uploadBlob]);
+    }, [localStream, uploadBlob, roomId, userId]);
 
     // ==========================================
-    // Recording loop
+    // Recording loop (keeps recording chunks)
     // ==========================================
+    
     const recordingLoop = useCallback(async () => {
-        console.log('🔁 Recording loop started');
-        
         while (shouldContinueRecordingRef.current) {
-            try {
-                await recordSingleChunk();
-                
-                // Small delay between chunks (100ms for restart)
-                if (shouldContinueRecordingRef.current) {
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                }
-            } catch (error) {
-                console.error('❌ Recording loop error:', error);
-                setRecordingError(error.message);
-                
-                // Continue recording despite error
-                if (shouldContinueRecordingRef.current) {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                }
+            await recordSingleChunk();
+            
+            // Small delay between chunks (reduced from 100ms to 50ms)
+            if (shouldContinueRecordingRef.current) {
+                await new Promise(resolve => setTimeout(resolve, 50));
             }
         }
         
@@ -244,10 +188,11 @@ const useRecording = (localStream, roomId, userId) => {
     // ==========================================
     // START RECORDING
     // ==========================================
+    
     const startRecording = useCallback(async () => {
         if (!localStream) {
             console.error('❌ No stream');
-            setRecordingError('No video stream available');
+            setRecordingError('No video stream');
             return;
         }
         
@@ -258,11 +203,10 @@ const useRecording = (localStream, roomId, userId) => {
         
         console.log('🎬 Starting continuous chunked recording...\n');
         
-        // Reset everything
+        // Reset
         recordedChunksRef.current = [];
         uploadedCountRef.current = 0;
         shouldContinueRecordingRef.current = true;
-        isUploadingRef.current = false;
         
         setStats({
             chunksRecorded: 0,
@@ -291,29 +235,16 @@ const useRecording = (localStream, roomId, userId) => {
     // ==========================================
     // STOP RECORDING
     // ==========================================
-    const stopRecording = useCallback(async () => {
+    
+    const stopRecording = useCallback(() => {
         console.log('\n🛑 Stopping recording...');
         
         // Signal to stop the loop
         shouldContinueRecordingRef.current = false;
         
-        // Clear timeout if exists
-        if (chunkTimeoutRef.current) {
-            clearTimeout(chunkTimeoutRef.current);
-            chunkTimeoutRef.current = null;
-        }
-        
         // Stop current recorder if active
         if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
             mediaRecorderRef.current.stop();
-        }
-        
-        // Wait for any ongoing upload
-        let waitCount = 0;
-        while (isUploadingRef.current && waitCount < 30) {
-            console.log('⏳ Waiting for upload to complete...');
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            waitCount++;
         }
         
         // Clear intervals
@@ -323,28 +254,24 @@ const useRecording = (localStream, roomId, userId) => {
         }
         
         setIsRecording(false);
-        console.log('✅ Recording stopped');
         
     }, []);
 
     // ==========================================
     // DOWNLOAD BACKUP
     // ==========================================
+    
     const downloadLocalRecording = useCallback(() => {
         alert('Local backup not available in chunked mode. Download from server instead.');
     }, []);
 
     // ==========================================
-    // CLEANUP ON UNMOUNT
+    // CLEANUP
     // ==========================================
+    
     useEffect(() => {
         return () => {
-            console.log('🧹 Recording hook cleanup');
             shouldContinueRecordingRef.current = false;
-            
-            if (chunkTimeoutRef.current) {
-                clearTimeout(chunkTimeoutRef.current);
-            }
             
             if (mediaRecorderRef.current?.state === 'recording') {
                 mediaRecorderRef.current.stop();
@@ -353,6 +280,8 @@ const useRecording = (localStream, roomId, userId) => {
             if (durationIntervalRef.current) {
                 clearInterval(durationIntervalRef.current);
             }
+            
+            console.log('🧹 Cleanup');
         };
     }, []);
 
