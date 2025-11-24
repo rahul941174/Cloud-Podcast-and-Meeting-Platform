@@ -366,6 +366,7 @@ export const processMeetingRecording = async (roomId) => {
         
     } catch (error) {
         console.error('\n❌ Processing failed:', error.message);
+        console.log("error");
         throw error;
     }
 };
