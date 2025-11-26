@@ -12,8 +12,12 @@ export const socket = io(BACKEND_URL, {
     reconnectionAttempts: 10,
     transports: ['websocket', 'polling'],
     withCredentials: true,
-    forceNew: true,
-    path: '/socket.io', // Explicitly set the path
+    forceNew: false, // 🔥 FIX: Changed to false to reuse connections
+    path: '/socket.io',
+    // 🔥 FIX: Added timeout settings
+    timeout: 20000,
+    upgrade: true,
+    rememberUpgrade: true
 });
 
 // Debug logs
@@ -50,6 +54,11 @@ socket.on("reconnect_error", (error) => {
 
 socket.on("reconnect_failed", () => {
     console.error("❌ Reconnection failed after all attempts");
+});
+
+// 🔥 FIX: Monitor transport upgrades
+socket.io.engine.on("upgrade", (transport) => {
+    console.log("⬆️ Transport upgraded to:", transport.name);
 });
 
 export default socket;

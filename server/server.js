@@ -12,7 +12,6 @@ import recordingRoutes from './src/routes/recordingRoutes.js';
 
 import Meeting from './src/models/Meeting.js';
 
-
 // 🎥 Import WebRTC Handler
 import { registerWebRTCHandlers } from './src/webrtc/webrtcHandler.js';
 
@@ -25,12 +24,11 @@ const app = express();
 
 const allowedOrigins = [
     'http://localhost:3000',
-    process.env.FRONTEND_URL // Will be set on Render
+    process.env.FRONTEND_URL
 ];
 
 app.use(cors({
     origin: function(origin, callback) {
-        // Allow requests with no origin (mobile apps, Postman, etc.)
         if(!origin) return callback(null, true);
         
         if(allowedOrigins.indexOf(origin) === -1) {
@@ -66,13 +64,21 @@ const io = new Server(server, {
         allowedHeaders: ['Content-Type', 'Authorization']
     },
     transports: ['websocket', 'polling'],
-    allowEIO3: true
+    allowEIO3: true,
+    pingTimeout: 60000,
+    pingInterval: 25000
 });
 
 console.log("🔌 Socket.io server initialized");
 console.log("📡 CORS origin allowed: http://localhost:3000");
 
+// 🔥 FIX: Enhanced socket mapping with cleanup
 io.socketUserMap = new Map();
+io.userSocketMap = new Map(); // Reverse mapping for quick lookup
+
+// 🔥 FIX: Active ping-pong health checks
+const PING_INTERVAL = 30000; // 30 seconds
+const PING_TIMEOUT = 10000; // 10 seconds
 
 // Fetch participants for a room
 async function fetchParticipantsForRoom(roomId) {
@@ -89,7 +95,6 @@ async function addParticipantToMeeting(roomId, userId) {
     const meeting = await Meeting.findOne({ roomId });
     if (!meeting) throw new Error('Meeting not found');
 
-    // Check if already exists
     if (meeting.participants.some(p => p.user.toString() === userId)) {
         console.log(`User ${userId} already in participants, skipping add.`);
         return meeting;
@@ -119,13 +124,76 @@ async function removeParticipantFromMeeting(roomId, userId) {
     return meeting;
 }
 
+// 🔥 FIX: Clean up stale socket for a user
+function cleanupStaleSocket(io, userId) {
+    const oldSocketId = io.userSocketMap.get(userId);
+    if (oldSocketId) {
+        console.log(`🧹 Cleaning up stale socket ${oldSocketId} for user ${userId}`);
+        io.socketUserMap.delete(oldSocketId);
+        
+        // Force disconnect old socket if it still exists
+        const oldSocket = io.sockets.sockets.get(oldSocketId);
+        if (oldSocket) {
+            oldSocket.disconnect(true);
+        }
+    }
+}
+
+// 🔥 FIX: Transfer host role when host disconnects
+async function transferHostRole(roomId) {
+    try {
+        const meeting = await Meeting.findOne({ roomId });
+        if (!meeting || meeting.participants.length === 0) {
+            return null;
+        }
+
+        // Find first non-host participant
+        const newHost = meeting.participants.find(p => 
+            p.user.toString() !== meeting.host.toString()
+        );
+
+        if (newHost) {
+            console.log(`👑 Transferring host role to ${newHost.user}`);
+            meeting.host = newHost.user;
+            
+            // Update role
+            const hostParticipant = meeting.participants.find(
+                p => p.user.toString() === newHost.user.toString()
+            );
+            if (hostParticipant) {
+                hostParticipant.role = 'host';
+            }
+            
+            await meeting.save();
+            return newHost.user.toString();
+        }
+
+        return null;
+    } catch (error) {
+        console.error("Error transferring host role:", error);
+        return null;
+    }
+}
 
 io.on("connection", (socket) => {
     console.log(`✅ New Client Connected: ${socket.id}`);
 
-    // This ADDS webrtc event listeners to the SAME socket
-    registerWebRTCHandlers(io, socket);
+    // 🔥 FIX: Setup ping-pong health check
+    let pingTimeout;
+    let pingInterval = setInterval(() => {
+        socket.emit('ping');
+        pingTimeout = setTimeout(() => {
+            console.log(`⚠️ Socket ${socket.id} failed ping check, disconnecting`);
+            socket.disconnect(true);
+        }, PING_TIMEOUT);
+    }, PING_INTERVAL);
 
+    socket.on('pong', () => {
+        clearTimeout(pingTimeout);
+    });
+
+    // Register WebRTC handlers
+    registerWebRTCHandlers(io, socket);
 
     // JOIN ROOM
     socket.on("join-room", async ({ roomId, userId, username }) => {
@@ -146,18 +214,26 @@ io.on("connection", (socket) => {
                 return;
             }
 
-            // Store socket mapping
+            // 🔥 FIX: Clean up stale socket before adding new one
+            cleanupStaleSocket(io, userId);
+
+            // Store socket mapping (both directions)
             io.socketUserMap.set(socket.id, { userId, username, roomId });
+            io.userSocketMap.set(userId, socket.id);
 
             // Join socket room
             socket.join(roomId);
             console.log(`👤 User ${username} (${userId}) joined room ${roomId}`);
 
-            // Add to DB (handles duplicates internally)
+            // Add to DB
             await addParticipantToMeeting(roomId, userId);
 
-            // Notify others
-            socket.to(roomId).emit("user-connected", { userId, username });
+            // 🔥 FIX: Notify others with explicit peer sync request
+            socket.to(roomId).emit("user-connected", { 
+                userId, 
+                username,
+                requiresPeerConnection: true 
+            });
 
             // Get updated participants list
             const participants = await fetchParticipantsForRoom(roomId);
@@ -185,21 +261,35 @@ io.on("connection", (socket) => {
 
             console.log(`🚪 User ${userId} leaving room ${roomId}`);
 
+            const meeting = await Meeting.findOne({ roomId });
+            const isHost = meeting && meeting.host.toString() === userId.toString();
+
             // Remove from DB
             await removeParticipantFromMeeting(roomId, userId);
 
             // Leave socket room
             socket.leave(roomId);
             io.socketUserMap.delete(socket.id);
+            io.userSocketMap.delete(userId);
 
-            // Notify others
-            socket.to(roomId).emit("user-disconnected", { userId });
+            // 🔥 FIX: If host left and meeting still has participants, transfer role
+            if (isHost && meeting && meeting.participants.length > 1) {
+                const newHostId = await transferHostRole(roomId);
+                if (newHostId) {
+                    io.in(roomId).emit("host-transferred", { newHostId });
+                }
+            }
+
+            // Notify others to cleanup peer connections
+            socket.to(roomId).emit("user-disconnected", { 
+                userId,
+                cleanupRequired: true 
+            });
 
             // Get updated list
             const participants = await fetchParticipantsForRoom(roomId);
             io.in(roomId).emit("participants-updated", participants);
 
-            // Confirm leave
             socket.emit("left-success", { roomId });
 
             console.log(`✅ User ${userId} left room ${roomId}`);
@@ -210,9 +300,9 @@ io.on("connection", (socket) => {
 
     // CHAT MESSAGE
     socket.on("send-message", ({ roomId, userId, username, text }) => {
-        try{
+        try {
             if (!roomId || !text || !username) {
-            socket.emit("error", { message: "Invalid message payload" });
+                socket.emit("error", { message: "Invalid message payload" });
                 return;
             }
 
@@ -225,7 +315,6 @@ io.on("connection", (socket) => {
 
             console.log(`💬 Message from ${username} (${roomId}): ${text}`);
 
-            // Broadcast to everyone in the same meeting
             io.in(roomId).emit("new-message", messageData);
             
         } catch (error) {
@@ -246,7 +335,6 @@ io.on("connection", (socket) => {
                 return;
             }
 
-            // Verify host
             if (meeting.host.toString() !== hostId.toString()) {
                 console.log("❌ Only host can end the meeting");
                 socket.emit("error", { message: "Only host can end meeting" });
@@ -256,19 +344,23 @@ io.on("connection", (socket) => {
             // Mark meeting as inactive
             meeting.isActive = false;
             meeting.participants = [];
-            
             await meeting.save();
 
-            // Notify everyone
+            // 🔥 FIX: Notify everyone to cleanup WebRTC connections
             io.in(roomId).emit("meeting-ended", {
-                message: "Meeting has been ended by the host."
+                message: "Meeting has been ended by the host.",
+                forceCleanup: true
             });
 
-            // Remove all clients from socket room
+            // Remove all clients from socket room and cleanup mappings
             const clients = await io.in(roomId).fetchSockets();
             for (const client of clients) {
-                client.leave(roomId);
+                const mapping = io.socketUserMap.get(client.id);
+                if (mapping) {
+                    io.userSocketMap.delete(mapping.userId);
+                }
                 io.socketUserMap.delete(client.id);
+                client.leave(roomId);
             }
 
             console.log(`✅ Meeting ${roomId} ended and all participants cleared.`);
@@ -278,42 +370,87 @@ io.on("connection", (socket) => {
         }
     });
 
-    // DISCONNECT
-    socket.on("disconnect", async (reason) => {
+    // 🔥 FIX: Handle disconnecting event for cleanup
+    socket.on("disconnecting", async (reason) => {
+        console.log(`⚠️ Socket ${socket.id} disconnecting:`, reason);
+        
         const mapping = io.socketUserMap.get(socket.id);
-        if (!mapping) {
-            console.log(`Socket ${socket.id} disconnected (no mapping). Reason:`, reason);
-            return;
-        }
+        if (!mapping) return;
 
         const { userId, username, roomId } = mapping;
-        console.log(`🔌 User ${username} (${userId}) disconnected from room ${roomId}. Reason:`, reason);
 
         try {
-            // Remove from DB
-            await removeParticipantFromMeeting(roomId, userId);
+            const meeting = await Meeting.findOne({ roomId });
+            if (!meeting) return;
 
-            // Notify others
-            socket.to(roomId).emit("user-disconnected", { userId, username });
+            const isHost = meeting.host.toString() === userId.toString();
 
-            // Update list
-            const participants = await fetchParticipantsForRoom(roomId);
-            io.in(roomId).emit("participants-updated", participants);
+            // 🔥 FIX: If host disconnects unexpectedly, end meeting
+            if (isHost) {
+                console.log(`👑 Host ${username} disconnected unexpectedly, ending meeting ${roomId}`);
+                
+                meeting.isActive = false;
+                meeting.participants = [];
+                await meeting.save();
+
+                // Notify all participants
+                socket.to(roomId).emit("meeting-ended", {
+                    message: "Meeting ended: Host disconnected",
+                    forceCleanup: true
+                });
+
+                // Cleanup all mappings for this room
+                const clients = await io.in(roomId).fetchSockets();
+                for (const client of clients) {
+                    const clientMapping = io.socketUserMap.get(client.id);
+                    if (clientMapping) {
+                        io.userSocketMap.delete(clientMapping.userId);
+                    }
+                    io.socketUserMap.delete(client.id);
+                }
+            } else {
+                // Regular participant disconnect
+                await removeParticipantFromMeeting(roomId, userId);
+                
+                socket.to(roomId).emit("user-disconnected", { 
+                    userId, 
+                    username,
+                    cleanupRequired: true 
+                });
+
+                const participants = await fetchParticipantsForRoom(roomId);
+                io.in(roomId).emit("participants-updated", participants);
+            }
 
             io.socketUserMap.delete(socket.id);
+            io.userSocketMap.delete(userId);
+
         } catch (error) {
-            console.error("❌ Error removing participant on disconnect:", error.message);
+            console.error("❌ Error in disconnecting handler:", error);
         }
     });
 
+    // DISCONNECT
+    socket.on("disconnect", async (reason) => {
+        console.log(`🔴 Socket ${socket.id} disconnected:`, reason);
+        
+        // Cleanup ping interval
+        clearInterval(pingInterval);
+        clearTimeout(pingTimeout);
 
+        // Final cleanup
+        const mapping = io.socketUserMap.get(socket.id);
+        if (mapping) {
+            io.socketUserMap.delete(socket.id);
+            io.userSocketMap.delete(mapping.userId);
+        }
+    });
 
     // START RECORDING (Host only)
     socket.on("start-recording", async ({ roomId, hostId }) => {
         try {
             console.log(`🎬 Host ${hostId} starting recording in room ${roomId}`);
             
-            // Verify host
             const meeting = await Meeting.findOne({ roomId });
             if (!meeting) {
                 console.log("❌ Meeting not found");
@@ -326,7 +463,6 @@ io.on("connection", (socket) => {
                 return;
             }
             
-            // Notify all participants to start recording
             io.in(roomId).emit("recording-started", {
                 message: "Recording started by host",
                 startTime: new Date().toISOString()
@@ -339,14 +475,11 @@ io.on("connection", (socket) => {
         }
     });
 
-    
-    
     // STOP RECORDING (Host only)
     socket.on("stop-recording", async ({ roomId, hostId }) => {
         try {
             console.log(`🛑 Host ${hostId} stopping recording in room ${roomId}`);
             
-            // Verify host
             const meeting = await Meeting.findOne({ roomId });
             if (!meeting) {
                 console.log("❌ Meeting not found");
@@ -359,7 +492,6 @@ io.on("connection", (socket) => {
                 return;
             }
             
-            // Notify all participants to stop recording
             io.in(roomId).emit("recording-stopped", {
                 message: "Recording stopped by host",
                 stopTime: new Date().toISOString()
@@ -370,13 +502,6 @@ io.on("connection", (socket) => {
         } catch (error) {
             console.error("❌ stop-recording error:", error);
         }
-    });
-
-
-
-
-    socket.on("disconnecting", (reason) => {
-        console.log(`⚠️ Socket ${socket.id} disconnecting:`, reason);
     });
 });
 

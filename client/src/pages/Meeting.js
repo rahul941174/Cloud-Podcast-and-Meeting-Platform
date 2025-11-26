@@ -17,22 +17,23 @@ const Meeting = () => {
     const [hostId, setHostId] = useState(null);
     const [socketConnected, setSocketConnected] = useState(false);
 
-    // 🎥 WebRTC Hook (now with connectionStatus!)
+    // WebRTC Hook
     const {
         localStream,
         remoteStreams,
         isVideoEnabled,
         isAudioEnabled,
-        connectionStatus,  // ← NEW!
+        connectionStatus,
         toggleVideo,
-        toggleAudio
+        toggleAudio,
+        cleanupConnections 
     } = useWebRTC(
         joined ? meetingId : null,
         user?._id || user?.id,
         participants
     );
 
-    // 🎬 Recording Hook
+    // Recording Hook
     const {
         isRecording,
         recordingError,
@@ -75,9 +76,15 @@ const Meeting = () => {
             console.log("🔴 Socket disconnected");
             setSocketConnected(false);
         };
+        
+        // 🔥 FIX: Handle ping/pong for health check
+        const handlePing = () => {
+            socket.emit('pong');
+        };
 
         socket.on("connect", handleConnect);
         socket.on("disconnect", handleDisconnect);
+        socket.on("ping", handlePing);
 
         if (socket.connected) {
             console.log("🟢 Socket already connected:", socket.id);
@@ -87,6 +94,7 @@ const Meeting = () => {
         return () => {
             socket.off("connect", handleConnect);
             socket.off("disconnect", handleDisconnect);
+            socket.off("ping", handlePing);
         };
     }, []);
 
@@ -104,9 +112,16 @@ const Meeting = () => {
             setMsg(`Successfully joined room ${data.roomId}`);
         });
 
+        // 🔥 FIX: Handle participants update with deduplication
         socket.on("participants-updated", (updatedList) => {
             console.log("👥 Participants updated:", updatedList);
-            setParticipants(updatedList || []);
+            
+            // Deduplicate participants by userId
+            const uniqueParticipants = updatedList.filter((participant, index, self) =>
+                index === self.findIndex((p) => p.userId === participant.userId)
+            );
+            
+            setParticipants(uniqueParticipants || []);
         });
 
         socket.on("user-connected", (data) => {
@@ -115,6 +130,18 @@ const Meeting = () => {
 
         socket.on("user-disconnected", (data) => {
             console.log("👋 User disconnected:", data);
+        });
+        
+        // 🔥 FIX: Handle host transfer
+        socket.on("host-transferred", (data) => {
+            console.log("👑 Host role transferred to:", data.newHostId);
+            setHostId(data.newHostId);
+            
+            if (data.newHostId === (user._id || user.id).toString()) {
+                setMsg("You are now the host of this meeting");
+            } else {
+                setMsg("Host role has been transferred");
+            }
         });
 
         socket.on("left-success", (data) => {
@@ -126,14 +153,39 @@ const Meeting = () => {
             localStorage.removeItem("currentRoomId");
         });
 
+        // 🔥 FIX: Enhanced meeting-ended handler
         socket.on("meeting-ended", (data) => {
             console.log("🛑 Meeting ended:", data);
+
+            // Stop recording if active
+            if (isRecording) {
+                try {
+                    stopRecording();
+                } catch (err) {
+                    console.error("Error stopping recording:", err);
+                }
+            }
+
+            // 🔥 FIX: Force complete WebRTC cleanup
+            try {
+                cleanupConnections();
+            } catch (err) {
+                console.error("Cleanup failed:", err);
+            }
+
             alert(data.message || "Meeting ended by host.");
+
+            // Update state
             setJoined(false);
             setParticipants([]);
             setHostId(null);
-            setMsg("Meeting ended by host.");
+            setMsg(data.message || "Meeting ended.");
             localStorage.removeItem("currentRoomId");
+
+            // Redirect after cleanup
+            setTimeout(() => {
+                window.location.href = "/dashboard";
+            }, 1000);
         });
 
         socket.on("join-error", (data) => {
@@ -171,6 +223,7 @@ const Meeting = () => {
             socket.off("participants-updated");
             socket.off("user-connected");
             socket.off("user-disconnected");
+            socket.off("host-transferred");
             socket.off("left-success");
             socket.off("meeting-ended");
             socket.off("join-error");
@@ -178,7 +231,7 @@ const Meeting = () => {
             socket.off("recording-started");
             socket.off("recording-stopped");
         };
-    }, [user, isRecording, startRecording, stopRecording]);
+    }, [user, isRecording, startRecording, stopRecording, cleanupConnections]);
 
     const handleCreateMeeting = async () => {
         if (!user) {
@@ -267,6 +320,9 @@ const Meeting = () => {
         if (isRecording) {
             stopRecording();
         }
+        
+        // 🔥 FIX: Cleanup WebRTC before leaving
+        cleanupConnections();
 
         const userId = (user._id || user.id).toString();
         console.log("🚪 Leaving meeting:", { roomId: meetingId, userId });
@@ -393,7 +449,7 @@ const Meeting = () => {
             setMsg("⏳ Downloading recording...");
 
             const response = await api.get(`/recordings/download/${meetingId}`, {
-                responseType: "blob", // 👈 required for video/mp4
+                responseType: "blob",
             });
 
             const blob = new Blob([response.data], { type: "video/mp4" });
@@ -414,7 +470,6 @@ const Meeting = () => {
         }
     };
 
-
     const isHost = user && hostId && (
         (user._id?.toString() === hostId.toString()) ||
         (user.id?.toString() === hostId.toString())
@@ -426,9 +481,6 @@ const Meeting = () => {
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     };
 
-    // ==========================================
-    // 🎨 Connection Status Display Helper
-    // ==========================================
     const getConnectionStatusDisplay = () => {
         switch(connectionStatus) {
             case 'connected':
@@ -467,20 +519,13 @@ const Meeting = () => {
                 Room ID: {meetingId || "None"}<br />
                 Participants: {participants.length}<br />
                 
-                {/* NEW: WebRTC Connection Status */}
-                <span 
-                    style={{ 
-                        color: statusDisplay.color, 
-                        fontWeight: 'bold' 
-                    }}
-                >
+                <span style={{ color: statusDisplay.color, fontWeight: 'bold' }}>
                     WebRTC: {statusDisplay.icon} {statusDisplay.text}
                 </span><br />
                 
                 Video: {isVideoEnabled ? "🟢 On" : "🔴 Off"} | 
                 Audio: {isAudioEnabled ? "🟢 On" : "🔴 Off"}<br />
                 
-                {/* Recording Status */}
                 <strong>Recording:</strong> {isRecording ? "🔴 Active" : "⚫ Inactive"}<br />
                 {isRecording && (
                     <>

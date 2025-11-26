@@ -1,15 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { socket } from '../socket';
 
-/**
- * Production-Grade useWebRTC Hook
- * Manages WebRTC peer connections with reliability features:
- * - Automatic retry on failure (3 attempts with exponential backoff)
- * - Proper cleanup to prevent memory leaks
- * - Connection state monitoring
- * - ICE candidate queuing
- * - Stale connection detection
- */
+
 
 const useWebRTC = (roomId, userId, participants) => {
   // ==========================================
@@ -22,14 +14,16 @@ const useWebRTC = (roomId, userId, participants) => {
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
 
   // ==========================================
-  // REFS (Don't trigger re-renders)
+  // REFS
   // ==========================================
   const peerConnections = useRef({});
   const localStreamRef = useRef(null);
   const isCleaningUp = useRef(false);
   const retryAttempts = useRef({});
-  const pendingCandidates = useRef({}); // Queue candidates until remote description set
-  const connectionTimeouts = useRef({}); // Track connection timeouts
+  const pendingCandidates = useRef({});
+  const connectionTimeouts = useRef({});
+  const retryTimers = useRef({}); // 🔥 FIX: Track retry timers
+  const answerTimeouts = useRef({}); // 🔥 FIX: Track answer timeouts
 
   // ICE servers configuration
   const iceServersRef = useRef({
@@ -57,7 +51,7 @@ const useWebRTC = (roomId, userId, participants) => {
   });
 
   // ==========================================
-  // CLEANUP FUNCTION
+  // 🔥 FIX: COMPLETE CLEANUP FUNCTION
   // ==========================================
   const cleanupConnections = useCallback(() => {
     if (isCleaningUp.current) {
@@ -68,11 +62,21 @@ const useWebRTC = (roomId, userId, participants) => {
     console.log('🧹 Starting comprehensive cleanup...');
     isCleaningUp.current = true;
 
-    // Clear all timeouts
+    // 🔥 FIX: Clear ALL timeouts and timers
     Object.values(connectionTimeouts.current).forEach(timeout => {
       if (timeout) clearTimeout(timeout);
     });
     connectionTimeouts.current = {};
+    
+    Object.values(retryTimers.current).forEach(timer => {
+      if (timer) clearTimeout(timer);
+    });
+    retryTimers.current = {};
+    
+    Object.values(answerTimeouts.current).forEach(timeout => {
+      if (timeout) clearTimeout(timeout);
+    });
+    answerTimeouts.current = {};
 
     // Stop all local tracks
     if (localStreamRef.current) {
@@ -84,7 +88,7 @@ const useWebRTC = (roomId, userId, participants) => {
       localStreamRef.current = null;
     }
 
-    // Close all peer connections
+    // 🔥 FIX: Close all peer connections completely
     Object.entries(peerConnections.current).forEach(([peerId, pc]) => {
       if (pc) {
         try {
@@ -107,7 +111,7 @@ const useWebRTC = (roomId, userId, participants) => {
       }
     });
 
-    // Clear all data structures
+    // 🔥 FIX: Complete cleanup of all data structures
     peerConnections.current = {};
     retryAttempts.current = {};
     pendingCandidates.current = {};
@@ -122,6 +126,64 @@ const useWebRTC = (roomId, userId, participants) => {
   }, []);
 
   // ==========================================
+  // 🔥 FIX: CLEANUP SPECIFIC PEER
+  // ==========================================
+  const cleanupPeer = useCallback((peerId) => {
+    console.log(`🧹 Cleaning up peer: ${peerId}`);
+    
+    // Clear timers
+    if (connectionTimeouts.current[peerId]) {
+      clearTimeout(connectionTimeouts.current[peerId]);
+      delete connectionTimeouts.current[peerId];
+    }
+    
+    if (retryTimers.current[peerId]) {
+      clearTimeout(retryTimers.current[peerId]);
+      delete retryTimers.current[peerId];
+    }
+    
+    if (answerTimeouts.current[peerId]) {
+      clearTimeout(answerTimeouts.current[peerId]);
+      delete answerTimeouts.current[peerId];
+    }
+    
+    // Close peer connection
+    const pc = peerConnections.current[peerId];
+    if (pc) {
+      try {
+        pc.onicecandidate = null;
+        pc.ontrack = null;
+        pc.onconnectionstatechange = null;
+        pc.onicegatheringstatechange = null;
+        pc.onsignalingstatechange = null;
+        pc.oniceconnectionstatechange = null;
+        
+        if (pc.connectionState !== 'closed') {
+          pc.close();
+        }
+      } catch (error) {
+        console.error(`Error closing peer ${peerId}:`, error);
+      }
+    }
+    
+    // 🔥 FIX: Delete peer connection entry
+    delete peerConnections.current[peerId];
+    
+    // Clear pending candidates
+    delete pendingCandidates.current[peerId];
+    
+    // Reset retry counter
+    delete retryAttempts.current[peerId];
+    
+    // 🔥 FIX: Force remove remote stream from UI
+    setRemoteStreams((prev) => {
+      const updated = { ...prev };
+      delete updated[peerId];
+      return updated;
+    });
+  }, []);
+
+  // ==========================================
   // INITIALIZE LOCAL STREAM
   // ==========================================
   useEffect(() => {
@@ -131,7 +193,6 @@ const useWebRTC = (roomId, userId, participants) => {
     console.log('🎥 Initializing WebRTC for room:', roomId);
 
     const initLocalStream = async () => {
-      // Check if we already have a stream
       if (localStreamRef.current) {
         console.log('✅ Using existing stream');
         setConnectionStatus('ready');
@@ -155,7 +216,6 @@ const useWebRTC = (roomId, userId, participants) => {
         });
 
         if (!mounted) {
-          // Component unmounted, clean up
           stream.getTracks().forEach(track => track.stop());
           return;
         }
@@ -174,7 +234,6 @@ const useWebRTC = (roomId, userId, participants) => {
         if (mounted) {
           setConnectionStatus('error');
           
-          // Provide specific error messages
           let errorMessage = 'Cannot access camera/microphone. ';
           if (error.name === 'NotAllowedError') {
             errorMessage += 'Please grant permissions and refresh the page.';
@@ -193,7 +252,6 @@ const useWebRTC = (roomId, userId, participants) => {
 
     initLocalStream();
 
-    // Cleanup on unmount
     return () => {
       mounted = false;
       cleanupConnections();
@@ -201,7 +259,7 @@ const useWebRTC = (roomId, userId, participants) => {
   }, [roomId, userId, cleanupConnections]);
 
   // ==========================================
-  // CREATE PEER CONNECTION
+  // 🔥 FIX: CREATE PEER CONNECTION WITH FULL CLEANUP
   // ==========================================
   const createPeerConnection = useCallback(
     (peerId) => {
@@ -210,15 +268,10 @@ const useWebRTC = (roomId, userId, participants) => {
         return null;
       }
 
-      // Close existing connection if any
+      // 🔥 FIX: Complete cleanup of existing connection
       if (peerConnections.current[peerId]) {
-        console.log(`🔄 Closing existing connection to ${peerId}`);
-        try {
-          peerConnections.current[peerId].close();
-        } catch (error) {
-          console.error('Error closing existing connection:', error);
-        }
-        delete peerConnections.current[peerId];
+        console.log(`🔄 Cleaning up existing connection to ${peerId}`);
+        cleanupPeer(peerId);
       }
 
       console.log(`🔗 Creating peer connection for: ${peerId}`);
@@ -249,15 +302,24 @@ const useWebRTC = (roomId, userId, participants) => {
           }
         };
 
-        // Handle ICE candidates
+        // 🔥 FIX: Buffered ICE candidate emission
         pc.onicecandidate = (event) => {
           if (event.candidate && !isCleaningUp.current) {
-            console.log(`🧊 Sending ICE candidate to ${peerId}`);
-            socket.emit('webrtc:ice-candidate', {
-              candidate: event.candidate,
-              targetUserId: peerId,
-              roomId,
-            });
+            // Only send if remote description is set
+            if (pc.remoteDescription) {
+              console.log(`🧊 Sending ICE candidate to ${peerId}`);
+              socket.emit('webrtc:ice-candidate', {
+                candidate: event.candidate,
+                targetUserId: peerId,
+                roomId,
+              });
+            } else {
+              console.log(`🧊 Buffering ICE candidate for ${peerId} (no remote desc)`);
+              if (!pendingCandidates.current[peerId]) {
+                pendingCandidates.current[peerId] = [];
+              }
+              pendingCandidates.current[peerId].push(event.candidate);
+            }
           } else if (!event.candidate) {
             console.log(`✅ ICE gathering complete for ${peerId}`);
           }
@@ -274,41 +336,47 @@ const useWebRTC = (roomId, userId, participants) => {
             case 'connected':
               console.log(`✅ Successfully connected to ${peerId}`);
               setConnectionStatus('connected');
-              // Clear retry counter on success
               retryAttempts.current[peerId] = 0;
-              // Clear connection timeout
+              
+              // Clear timeouts
               if (connectionTimeouts.current[peerId]) {
                 clearTimeout(connectionTimeouts.current[peerId]);
                 delete connectionTimeouts.current[peerId];
+              }
+              if (answerTimeouts.current[peerId]) {
+                clearTimeout(answerTimeouts.current[peerId]);
+                delete answerTimeouts.current[peerId];
               }
               break;
 
             case 'failed':
               console.log(`⚠️ Connection failed with ${peerId}`);
-              // Retry logic with exponential backoff
               const attempts = retryAttempts.current[peerId] || 0;
+              
               if (attempts < 3) {
                 retryAttempts.current[peerId] = attempts + 1;
-                const delay = 2000 * Math.pow(2, attempts); // 2s, 4s, 8s
+                const delay = 2000 * Math.pow(2, attempts);
                 console.log(`   Retry attempt ${attempts + 1}/3 in ${delay}ms`);
                 
-                setTimeout(() => {
+                retryTimers.current[peerId] = setTimeout(() => {
                   if (!isCleaningUp.current) {
+                    cleanupPeer(peerId);
                     callPeer(peerId);
                   }
                 }, delay);
               } else {
                 console.error(`❌ Max retry attempts reached for ${peerId}`);
+                cleanupPeer(peerId);
                 setConnectionStatus('error');
               }
               break;
 
             case 'disconnected':
               console.log(`⚠️ Peer ${peerId} disconnected`);
-              // Set timeout to retry if not reconnected
               connectionTimeouts.current[peerId] = setTimeout(() => {
                 if (pc.connectionState === 'disconnected' && !isCleaningUp.current) {
                   console.log(`   Attempting to reconnect to ${peerId}`);
+                  cleanupPeer(peerId);
                   callPeer(peerId);
                 }
               }, 5000);
@@ -316,26 +384,45 @@ const useWebRTC = (roomId, userId, participants) => {
 
             case 'closed':
               console.log(`❌ Connection closed with ${peerId}`);
-              setRemoteStreams((prev) => {
-                const updated = { ...prev };
-                delete updated[peerId];
-                return updated;
-              });
+              cleanupPeer(peerId);
               break;
           }
         };
 
-        // Monitor ICE connection state
         pc.oniceconnectionstatechange = () => {
           console.log(`🧊 ICE connection state with ${peerId}:`, pc.iceConnectionState);
+          
+          // 🔥 FIX: Handle ICE restart if needed
+          if (pc.iceConnectionState === 'failed' && !isCleaningUp.current) {
+            console.log(`🔄 ICE connection failed for ${peerId}, restarting...`);
+            try {
+              pc.restartIce();
+            } catch (error) {
+              console.error('ICE restart failed:', error);
+            }
+          }
         };
 
-        // Monitor ICE gathering state
         pc.onicegatheringstatechange = () => {
           console.log(`🧊 ICE gathering state with ${peerId}:`, pc.iceGatheringState);
+          
+          // 🔥 FIX: Flush buffered candidates when gathering complete
+          if (pc.iceGatheringState === 'complete' && pc.remoteDescription) {
+            const buffered = pendingCandidates.current[peerId] || [];
+            if (buffered.length > 0) {
+              console.log(`🧊 Flushing ${buffered.length} buffered ICE candidates for ${peerId}`);
+              buffered.forEach(candidate => {
+                socket.emit('webrtc:ice-candidate', {
+                  candidate,
+                  targetUserId: peerId,
+                  roomId,
+                });
+              });
+              pendingCandidates.current[peerId] = [];
+            }
+          }
         };
 
-        // Monitor signaling state
         pc.onsignalingstatechange = () => {
           console.log(`📡 Signaling state with ${peerId}:`, pc.signalingState);
         };
@@ -352,11 +439,11 @@ const useWebRTC = (roomId, userId, participants) => {
         return null;
       }
     },
-    [localStream, roomId]
+    [localStream, roomId, cleanupPeer]
   );
 
   // ==========================================
-  // CALL A PEER (Initiate connection)
+  // 🔥 FIX: CALL PEER WITH TIMEOUT
   // ==========================================
   const callPeer = useCallback(
     async (peerId) => {
@@ -387,13 +474,30 @@ const useWebRTC = (roomId, userId, participants) => {
         });
 
         console.log(`📤 Offer sent to ${peerId}`);
+        
+        // 🔥 FIX: Set timeout for answer
+        answerTimeouts.current[peerId] = setTimeout(() => {
+          if (pc.signalingState === 'have-local-offer') {
+            console.log(`⏱️ No answer received from ${peerId} in time`);
+            cleanupPeer(peerId);
+            
+            // Retry once
+            const attempts = retryAttempts.current[peerId] || 0;
+            if (attempts < 1) {
+              retryAttempts.current[peerId] = attempts + 1;
+              console.log(`   Retrying call to ${peerId}...`);
+              setTimeout(() => callPeer(peerId), 2000);
+            }
+          }
+        }, 8000);
 
       } catch (error) {
         console.error(`❌ Error calling peer ${peerId}:`, error);
         setConnectionStatus('error');
+        cleanupPeer(peerId);
       }
     },
-    [createPeerConnection, roomId]
+    [createPeerConnection, roomId, cleanupPeer]
   );
 
   // ==========================================
@@ -416,7 +520,7 @@ const useWebRTC = (roomId, userId, participants) => {
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         console.log(`✅ Remote description set from ${fromUserId}`);
 
-        // Process any pending ICE candidates
+        // Process pending ICE candidates
         if (pendingCandidates.current[fromUserId]?.length > 0) {
           console.log(`   Processing ${pendingCandidates.current[fromUserId].length} pending candidates`);
           for (const candidate of pendingCandidates.current[fromUserId]) {
@@ -444,6 +548,7 @@ const useWebRTC = (roomId, userId, participants) => {
       } catch (error) {
         console.error(`❌ Error handling offer from ${fromUserId}:`, error);
         setConnectionStatus('error');
+        cleanupPeer(fromUserId);
       }
     };
 
@@ -459,7 +564,6 @@ const useWebRTC = (roomId, userId, participants) => {
         return;
       }
 
-      // Only set remote description if we're in the right state
       if (pc.signalingState !== 'have-local-offer') {
         console.warn(`Cannot set remote answer, signaling state is: ${pc.signalingState}`);
         return;
@@ -468,8 +572,14 @@ const useWebRTC = (roomId, userId, participants) => {
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
         console.log(`✅ Remote description set from ${fromUserId}`);
+        
+        // 🔥 FIX: Clear answer timeout
+        if (answerTimeouts.current[fromUserId]) {
+          clearTimeout(answerTimeouts.current[fromUserId]);
+          delete answerTimeouts.current[fromUserId];
+        }
 
-        // Process any pending ICE candidates
+        // Process pending ICE candidates
         if (pendingCandidates.current[fromUserId]?.length > 0) {
           console.log(`   Processing ${pendingCandidates.current[fromUserId].length} pending candidates`);
           for (const candidate of pendingCandidates.current[fromUserId]) {
@@ -482,11 +592,11 @@ const useWebRTC = (roomId, userId, participants) => {
           pendingCandidates.current[fromUserId] = [];
         }
 
-        // Reset retry counter on successful answer
         retryAttempts.current[fromUserId] = 0;
 
       } catch (error) {
         console.error(`❌ Error handling answer from ${fromUserId}:`, error);
+        cleanupPeer(fromUserId);
       }
     };
 
@@ -500,9 +610,7 @@ const useWebRTC = (roomId, userId, participants) => {
         return;
       }
 
-      // Check if remote description is set
       if (!pc.remoteDescription || !pc.remoteDescription.type) {
-        // Queue the candidate for later
         console.log(`🧊 Queuing ICE candidate from ${fromUserId} (remote description not set)`);
         if (!pendingCandidates.current[fromUserId]) {
           pendingCandidates.current[fromUserId] = [];
@@ -511,7 +619,6 @@ const useWebRTC = (roomId, userId, participants) => {
         return;
       }
 
-      // Add candidate immediately
       try {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
         console.log(`🧊 Added ICE candidate from ${fromUserId}`);
@@ -519,43 +626,87 @@ const useWebRTC = (roomId, userId, participants) => {
         console.error(`❌ Error adding ICE candidate from ${fromUserId}:`, error);
       }
     };
+    
+    // 🔥 FIX: Handle answer timeout
+    const handleAnswerTimeout = ({ targetUserId }) => {
+      console.log(`⏱️ Answer timeout for ${targetUserId}`);
+      cleanupPeer(targetUserId);
+    };
+    
+    // 🔥 FIX: Handle renegotiation request
+    const handleRenegotiateRequest = async ({ fromUserId }) => {
+      console.log(`🔄 Renegotiation requested by ${fromUserId}`);
+      
+      const pc = peerConnections.current[fromUserId];
+      if (pc && pc.connectionState === 'connected') {
+        cleanupPeer(fromUserId);
+        setTimeout(() => callPeer(fromUserId), 500);
+      }
+    };
 
     // Register socket listeners
     socket.on('webrtc:offer', handleOffer);
     socket.on('webrtc:answer', handleAnswer);
     socket.on('webrtc:ice-candidate', handleCandidate);
+    socket.on('webrtc:answer-timeout', handleAnswerTimeout);
+    socket.on('webrtc:renegotiate-request', handleRenegotiateRequest);
 
     console.log('✅ Socket listeners registered');
 
-    // Cleanup
     return () => {
       socket.off('webrtc:offer', handleOffer);
       socket.off('webrtc:answer', handleAnswer);
       socket.off('webrtc:ice-candidate', handleCandidate);
+      socket.off('webrtc:answer-timeout', handleAnswerTimeout);
+      socket.off('webrtc:renegotiate-request', handleRenegotiateRequest);
       console.log('🧹 Socket listeners removed');
     };
-  }, [localStream, roomId, createPeerConnection]);
+  }, [localStream, roomId, createPeerConnection, callPeer, cleanupPeer]);
 
   // ==========================================
-  // HANDLE NEW PARTICIPANTS
+  // 🔥 FIX: HANDLE USER DISCONNECTION
+  // ==========================================
+  useEffect(() => {
+    const handleUserDisconnected = ({ userId: disconnectedUserId, cleanupRequired }) => {
+      console.log(`👋 User ${disconnectedUserId} disconnected`);
+      
+      if (cleanupRequired) {
+        cleanupPeer(disconnectedUserId);
+      }
+    };
+
+    socket.on('user-disconnected', handleUserDisconnected);
+
+    return () => {
+      socket.off('user-disconnected', handleUserDisconnected);
+    };
+  }, [cleanupPeer]);
+
+  // ==========================================
+  // 🔥 FIX: HANDLE NEW PARTICIPANTS (IMPROVED)
   // ==========================================
   useEffect(() => {
     if (!localStream || !participants.length || isCleaningUp.current) return;
 
-    // Small delay to ensure everything is ready
     const timer = setTimeout(() => {
       if (isCleaningUp.current) return;
 
       participants.forEach((participant) => {
         const participantId = participant.userId;
         
-        // Don't call ourselves
         if (participantId === userId) return;
 
-        // Don't create duplicate connections
-        if (peerConnections.current[participantId]) {
-          console.log(`⚠️ Connection already exists for ${participantId}`);
+        // 🔥 FIX: Check if connection exists and is connected
+        const existingPC = peerConnections.current[participantId];
+        if (existingPC && existingPC.connectionState === 'connected') {
+          console.log(`⚠️ Already connected to ${participantId}`);
           return;
+        }
+
+        // 🔥 FIX: If connection exists but not connected, clean up first
+        if (existingPC) {
+          console.log(`🔄 Cleaning stale connection to ${participantId}`);
+          cleanupPeer(participantId);
         }
 
         console.log(`👤 New participant detected: ${participant.username} (${participantId})`);
@@ -564,7 +715,7 @@ const useWebRTC = (roomId, userId, participants) => {
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [participants, localStream, userId, callPeer]);
+  }, [participants, localStream, userId, callPeer, cleanupPeer]);
 
   // ==========================================
   // TOGGLE VIDEO
@@ -582,6 +733,14 @@ const useWebRTC = (roomId, userId, participants) => {
       socket.emit('webrtc:toggle-video', {
         roomId,
         enabled: videoTrack.enabled,
+      });
+      
+      // 🔥 FIX: Request renegotiation for all peers
+      Object.keys(peerConnections.current).forEach(peerId => {
+        socket.emit('webrtc:renegotiate', {
+          targetUserId: peerId,
+          roomId
+        });
       });
     }
   }, [localStream, roomId]);
@@ -614,10 +773,10 @@ const useWebRTC = (roomId, userId, participants) => {
     remoteStreams,
     isVideoEnabled,
     isAudioEnabled,
-    connectionStatus, // 'disconnected' | 'ready' | 'connecting' | 'connected' | 'error'
+    connectionStatus,
     toggleVideo,
     toggleAudio,
-    cleanupConnections, // Exposed for manual cleanup if needed
+    cleanupConnections,
   };
 };
 
