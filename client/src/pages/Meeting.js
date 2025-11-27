@@ -497,6 +497,7 @@ const Meeting = () => {
     };
 
     const statusDisplay = getConnectionStatusDisplay();
+    const rtcKey = joined ? meetingId : "no-meeting";
 
     return (
         <div style={{ padding: "20px", maxWidth: "1400px", margin: "0 auto" }}>
@@ -613,7 +614,7 @@ const Meeting = () => {
                     )}
                 </div>
             ) : (
-                <>
+                <div key={rtcKey}>
                     <h3 style={{ textAlign: "center" }}>📍 Meeting Room: {meetingId}</h3>
 
                     {/* Connection Status Banner */}
@@ -853,7 +854,7 @@ const Meeting = () => {
                             </div>
                         )}
                     </div>
-                </>
+                </div>
             )}
         </div>
     );
