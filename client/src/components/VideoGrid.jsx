@@ -22,16 +22,19 @@ const VideoGrid = ({ localStream, remoteStreams, participants, currentUserId }) 
         <div
             style={{
                 width: "100%",
-                padding: "20px 0",
+                padding: "15px 0 10px 0",
                 background: "transparent",
+                borderRadius: "10px",
             }}
         >
             <h3
                 style={{
-                    marginBottom: "18px",
-                    color: "#222",
+                    marginBottom: "15px",
+                    color: "#eaeaea",
                     textAlign: "center",
                     fontWeight: "600",
+                    fontSize: "20px",
+                    letterSpacing: "0.5px",
                 }}
             >
                 🎥 Live Meeting ({totalVideos})
@@ -41,9 +44,13 @@ const VideoGrid = ({ localStream, remoteStreams, participants, currentUserId }) 
                 style={{
                     display: "grid",
                     gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-                    gap: "18px",
-                    padding: "10px",
-                    minHeight: "420px",
+                    gap: "16px",
+                    padding: "10px 12px",
+                    minHeight: "450px",
+                    background: "#0f0f0f",
+                    borderRadius: "12px",
+                    border: "1px solid #1c1c1c",
+                    boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
                 }}
             >
                 {/* Local user tile */}
@@ -76,7 +83,7 @@ const VideoGrid = ({ localStream, remoteStreams, participants, currentUserId }) 
                         textAlign: "center",
                         color: "#777",
                         fontSize: "14px",
-                        letterSpacing: "0.4px",
+                        letterSpacing: "0.3px",
                     }}
                 >
                     Waiting for others to join…

@@ -15,16 +15,26 @@ const VideoPlayer = ({ stream, username, isLocal = false, muted = false }) => {
                 position: "relative",
                 width: "100%",
                 height: "100%",
-                background: "linear-gradient(135deg, #1e1e1e, #2a2a2a)",
+                background: "linear-gradient(145deg, #141414, #0d0d0d)",
                 borderRadius: "14px",
                 overflow: "hidden",
                 border: "1px solid rgba(255,255,255,0.08)",
-                boxShadow: "0 8px 25px rgba(0,0,0,0.3)",
+                boxShadow: "0 8px 22px rgba(0,0,0,0.35)",
                 display: "flex",
                 justifyContent: "center",
                 alignItems: "center",
+                transition: "0.2s ease",
+            }}
+            onMouseOver={(e) => {
+                e.currentTarget.style.boxShadow = "0 8px 30px rgba(0,0,0,0.55)";
+                e.currentTarget.style.transform = "scale(1.015)";
+            }}
+            onMouseOut={(e) => {
+                e.currentTarget.style.boxShadow = "0 8px 22px rgba(0,0,0,0.35)";
+                e.currentTarget.style.transform = "scale(1)";
             }}
         >
+            {/* VIDEO FEED */}
             <video
                 ref={videoRef}
                 autoPlay
@@ -34,21 +44,22 @@ const VideoPlayer = ({ stream, username, isLocal = false, muted = false }) => {
                     width: "100%",
                     height: "100%",
                     objectFit: "cover",
-                    filter: stream ? "none" : "grayscale(70%) blur(3px)",
-                    transition: "0.3s ease-in-out",
+                    opacity: stream ? 1 : 0.35,
+                    filter: stream ? "none" : "grayscale(60%) blur(2px)",
+                    transition: "opacity 0.3s ease",
                 }}
             />
 
-            {/* Username badge */}
+            {/* USERNAME BADGE */}
             <div
                 style={{
                     position: "absolute",
-                    bottom: "12px",
-                    left: "12px",
-                    padding: "6px 14px",
+                    bottom: "10px",
+                    left: "10px",
+                    padding: "6px 12px",
                     background: "rgba(0,0,0,0.55)",
                     backdropFilter: "blur(6px)",
-                    color: "#fff",
+                    color: "white",
                     borderRadius: "6px",
                     fontSize: "13px",
                     fontWeight: "500",
@@ -58,7 +69,7 @@ const VideoPlayer = ({ stream, username, isLocal = false, muted = false }) => {
                 {username} {isLocal && "(You)"}
             </div>
 
-            {/* No stream placeholder */}
+            {/* NO STREAM PLACEHOLDER */}
             {!stream && (
                 <div
                     style={{
@@ -66,10 +77,10 @@ const VideoPlayer = ({ stream, username, isLocal = false, muted = false }) => {
                         top: "50%",
                         left: "50%",
                         transform: "translate(-50%, -50%)",
-                        color: "#bbb",
+                        color: "#aaa",
                         fontSize: "16px",
                         fontWeight: 500,
-                        textShadow: "0 2px 4px rgba(0,0,0,0.5)",
+                        textShadow: "0 2px 4px rgba(0,0,0,0.6)",
                     }}
                 >
                     No video stream

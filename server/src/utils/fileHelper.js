@@ -1,104 +1,90 @@
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-// Get current directory (ES module fix)
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// server/src/utils/fileHelper.js
+import fs from "fs";
+import path from "path";
 
 /**
- * Create directory if it doesn't exist
+ * Root recordings directory (shared with merge-worker)
+ * -> server/recordings/
  */
-export const ensureDirectoryExists = (dirPath) => {
-    if (!fs.existsSync(dirPath)) {
-        fs.mkdirSync(dirPath, { recursive: true });
-        console.log(`✅ Created directory: ${dirPath}`);
+export const RECORDINGS_DIR = path.join(process.cwd(), "recordings");
+
+/**
+ * Ensure directory exists (safe)
+ */
+export function ensureDir(dir) {
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      console.log(`📁 Created directory → ${dir}`);
     }
-};
+  } catch (err) {
+    console.error("❌ Failed to create directory:", dir, err);
+    throw err;
+  }
+}
 
 /**
- * Get the base uploads directory
+ * Create & return meeting directory:
+ * recordings/<roomId>/
  */
-export const getUploadsDir = () => {
-    // Go up from utils → src → server root → uploads
-    return path.join(__dirname, '..', '..', 'uploads', 'recordings');
-};
+export function getMeetingDir(roomId) {
+  const meetingDir = path.join(RECORDINGS_DIR, roomId);
+  ensureDir(RECORDINGS_DIR);
+  ensureDir(meetingDir);
+  return meetingDir;
+}
 
 /**
- * Get directory for a specific meeting
+ * Create & return user directory:
+ * recordings/<roomId>/<userId>/
  */
-export const getMeetingDir = (roomId) => {
-    const baseDir = getUploadsDir();
-    const meetingDir = path.join(baseDir, roomId);
-    ensureDirectoryExists(meetingDir);
-    return meetingDir;
-};
+export function getUserRecordingDir(roomId, userId) {
+  const meetingDir = getMeetingDir(roomId);
+  const userDir = path.join(meetingDir, userId.toString());
+  ensureDir(userDir);
+  return userDir;
+}
 
 /**
- * Get directory for a specific user's recordings in a meeting
+ * Ensures both meeting & user dirs exist
  */
-export const getUserRecordingDir = (roomId, userId) => {
-    const meetingDir = getMeetingDir(roomId);
-    const userDir = path.join(meetingDir, userId);
-    ensureDirectoryExists(userDir);
-    return userDir;
-};
+export function ensureMeetingUserDirs(roomId, userId) {
+  const meetingDir = getMeetingDir(roomId);
+  const userDir = getUserRecordingDir(roomId, userId);
+  return { meetingDir, userDir };
+}
 
 /**
- * Save chunk to disk
+ * Save chunk atomically:
+ * 1. write file.tmp
+ * 2. rename → final.webm
+ *
+ * prevents half-written files & corruption
  */
-export const saveChunk = async (roomId, userId, chunkIndex, buffer) => {
-    try {
-        const userDir = getUserRecordingDir(roomId, userId);
-        const filename = `chunk_${chunkIndex}.webm`;
-        const filepath = path.join(userDir, filename);
-        
-        console.log(`\n💾 SAVING CHUNK:`);
-        console.log(`   Room: ${roomId}`);
-        console.log(`   User: ${userId}`);
-        console.log(`   Index: ${chunkIndex}`);
-        console.log(`   Filename: ${filename}`);
-        console.log(`   Path: ${filepath}`);
-        console.log(`   Size: ${buffer.length} bytes\n`);
-        
-        // Check if file already exists
-        if (fs.existsSync(filepath)) {
-            const existingSize = fs.statSync(filepath).size;
-            console.log(`⚠️ WARNING: ${filename} already exists! (${existingSize} bytes)`);
-            console.log(`   Will OVERWRITE with new ${buffer.length} bytes\n`);
-        }
-        
-        // Write buffer to file
-        await fs.promises.writeFile(filepath, buffer);
-        
-        // Verify it was saved
-        const savedSize = fs.statSync(filepath).size;
-        console.log(`✅ Saved chunk: ${filename} (${savedSize} bytes)`);
-        
-        return {
-            success: true,
-            filepath,
-            filename,
-            size: buffer.length
-        };
-    } catch (error) {
-        console.error('❌ Error saving chunk:', error);
-        throw error;
-    }
-};
+export async function saveChunkToDisk(filePath, buffer) {
+  return new Promise((resolve, reject) => {
+    const tmpPath = filePath + ".tmp";
+
+    fs.writeFile(tmpPath, buffer, (err) => {
+      if (err) return reject(err);
+
+      fs.rename(tmpPath, filePath, (err2) => {
+        if (err2) return reject(err2);
+
+        resolve();
+      });
+    });
+  });
+}
 
 /**
- * Clean up recordings for a meeting (after merging)
+ * Helper: delete complete meeting dir
  */
-export const cleanupMeetingRecordings = async (roomId) => {
-    try {
-        const meetingDir = getMeetingDir(roomId);
-        
-        if (fs.existsSync(meetingDir)) {
-            await fs.promises.rm(meetingDir, { recursive: true, force: true });
-            console.log(`✅ Cleaned up recordings for meeting: ${roomId}`);
-        }
-    } catch (error) {
-        console.error('❌ Error cleaning up recordings:', error);
-    }
-};
+export function deleteMeetingDir(roomId) {
+  const meetingDir = getMeetingDir(roomId);
+
+  if (fs.existsSync(meetingDir)) {
+    fs.rmSync(meetingDir, { recursive: true, force: true });
+    console.log(`🗑️ Deleted recordings for room ${roomId}`);
+  }
+}

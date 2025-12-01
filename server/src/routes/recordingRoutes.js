@@ -1,25 +1,37 @@
-import express from 'express';
-import { uploadChunk, getRecordingStatus } from '../controllers/recordingController.js';
-import { 
-    mergeMeetingRecording, 
-    downloadMeetingRecording,
-    deleteRecording,           
-    cleanupAllRecordings       
-} from '../controllers/mergeController.js';
-import auth from '../middlewares/auth.js';
+// server/src/routes/recordingRoutes.js
+
+import express from "express";
+import {
+  uploadChunk,
+  getRecordingStatus,
+} from "../controllers/recordingController.js";
+
+import {
+  mergeMeetingRecording,
+  downloadMeetingRecording,
+  deleteRecording,
+} from "../controllers/mergeController.js";
 
 const router = express.Router();
 
-// Recording routes
-router.post('/upload-chunk', auth, uploadChunk);
-router.get('/status/:roomId', auth, getRecordingStatus);
+/**
+ * ROUTES
+ * ------
+ * /upload-chunk       → upload WebM chunk
+ * /status/:roomId     → get recording status
+ * /merge/:roomId      → merge all chunks
+ * /download/:roomId   → download merged MP4
+ * /delete/:roomId     → delete meeting's recordings
+ */
 
-// Merge routes
-router.post('/merge/:roomId', auth, mergeMeetingRecording);
-router.get('/download/:roomId', auth, downloadMeetingRecording);
+router.post("/upload-chunk", uploadChunk);
 
-//   Cleanup routes
-router.delete('/delete/:roomId', auth, deleteRecording);           // Delete one
-router.post('/cleanup-all', auth, cleanupAllRecordings);           // Delete all
+router.get("/status/:roomId", getRecordingStatus);
+
+router.post("/merge/:roomId", mergeMeetingRecording);
+
+router.get("/download/:roomId", downloadMeetingRecording);
+
+router.delete("/delete/:roomId", deleteRecording);
 
 export default router;

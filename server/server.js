@@ -1,3 +1,4 @@
+// server/server.js
 import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
@@ -5,506 +6,348 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import connectDB from './src/config/db.js';
-import userRoutes from "./src/routes/userRoutes.js";
+import Meeting from './src/models/Meeting.js';
+import { requestMerge } from "./src/utils/mergeWorkerClient.js";
 import authRoutes from './src/routes/authRoutes.js';
 import meetingRoutes from './src/routes/meetingRoutes.js';
 import recordingRoutes from './src/routes/recordingRoutes.js';
-
-import Meeting from './src/models/Meeting.js';
-
-// 🎥 Import WebRTC Handler
-import { registerWebRTCHandlers } from './src/webrtc/webrtcHandler.js';
+import fs from 'fs';
 
 dotenv.config();
 const PORT = process.env.PORT || 5000;
 
-connectDB();
-
+/**
+ * Express app and middleware
+ */
 const app = express();
 
 const allowedOrigins = [
-    'http://localhost:3000',
-    process.env.FRONTEND_URL
-];
+  'http://localhost:3000',
+  process.env.FRONTEND_URL,
+].filter(Boolean);
 
-app.use(cors({
-    origin: function(origin, callback) {
-        if(!origin) return callback(null, true);
-        
-        if(allowedOrigins.indexOf(origin) === -1) {
-            const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
-            return callback(new Error(msg), false);
-        }
-        return callback(null, true);
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error('CORS not allowed by server'), false);
     },
     credentials: true,
-}));
+  })
+);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cookieParser());
 
-app.get('/', (req, res) => {
-    res.send('Server is running');
-});
+app.get('/', (req, res) => res.send('API running'));
 
-// Routes
-app.use("/api/users", userRoutes);
-app.use("/api/auth", authRoutes);
-app.use("/api/meetings", meetingRoutes);
-app.use("/api/recordings", recordingRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/meetings', meetingRoutes);
+app.use('/api/recordings', recordingRoutes);
 
-// HTTP + SOCKET.io Server
-const server = http.createServer(app);
-const io = new Server(server, {
+connectDB().then(() => {
+  const server = http.createServer(app);
+
+  const io = new Server(server, {
     cors: {
-        origin: allowedOrigins,
-        methods: ['GET', 'POST'],
-        credentials: true,
-        allowedHeaders: ['Content-Type', 'Authorization']
+      origin: allowedOrigins,
+      methods: ['GET', 'POST'],
+      credentials: true,
     },
     transports: ['websocket', 'polling'],
-    allowEIO3: true,
-    pingTimeout: 60000,
-    pingInterval: 25000
-});
+  });
 
-console.log("🔌 Socket.io server initialized");
-console.log("📡 CORS origin allowed: http://localhost:3000");
+  io.userSocketMap = new Map();
+  io.socketUserMap = new Map();
 
-// 🔥 FIX: Enhanced socket mapping with cleanup
-io.socketUserMap = new Map();
-io.userSocketMap = new Map(); // Reverse mapping for quick lookup
+  function socketForUser(userId) {
+    const socketId = io.userSocketMap.get(String(userId));
+    if (!socketId) return null;
+    return io.sockets.sockets.get(socketId) || null;
+  }
 
-// 🔥 FIX: Active ping-pong health checks
-const PING_INTERVAL = 30000; // 30 seconds
-const PING_TIMEOUT = 10000; // 10 seconds
-
-// Fetch participants for a room
-async function fetchParticipantsForRoom(roomId) {
-    const meeting = await Meeting.findOne({ roomId }).populate("participants.user", "username");
-    if (!meeting) return [];
-    return meeting.participants.map(p => ({
+  async function getParticipantsList(roomId) {
+    try {
+      const meeting = await Meeting.findOne({ roomId }).populate('participants.user', 'username');
+      if (!meeting) return [];
+      return meeting.participants.map((p) => ({
         userId: p.user._id.toString(),
         username: p.user.username,
-    }));
-}
-
-// Add participant to meeting (with duplicate check)
-async function addParticipantToMeeting(roomId, userId) {
-    const meeting = await Meeting.findOne({ roomId });
-    if (!meeting) throw new Error('Meeting not found');
-
-    if (meeting.participants.some(p => p.user.toString() === userId)) {
-        console.log(`User ${userId} already in participants, skipping add.`);
-        return meeting;
+      }));
+    } catch (err) {
+      console.error('Error fetching participants list:', err.message);
+      return [];
     }
+  }
 
-    const isHost = meeting.host.toString() === userId.toString();
-    const role = isHost ? 'host' : 'participant';
-    
-    console.log(`Adding user ${userId} as ${role}`);
+  const hostDisconnectTimers = new Map();
+  const HOST_DISCONNECT_GRACE_MS = 12000;
+  const POST_STOP_UPLOAD_GRACE_MS = 4000;
 
-    meeting.participants.push({ user: userId, role: role });
-    await meeting.save();
-    console.log(`Added user ${userId} to meeting ${roomId}`);
-    return meeting;
-}
-
-// Remove participant from meeting
-async function removeParticipantFromMeeting(roomId, userId) {
-    const meeting = await Meeting.findOne({ roomId });
-    if (!meeting) return null;
-
-    meeting.participants = meeting.participants.filter(
-        p => p.user.toString() !== userId
-    );
-    await meeting.save();
-    console.log(`Removed user ${userId} from meeting ${roomId}`);
-    return meeting;
-}
-
-// 🔥 FIX: Clean up stale socket for a user
-function cleanupStaleSocket(io, userId) {
-    const oldSocketId = io.userSocketMap.get(userId);
-    if (oldSocketId) {
-        console.log(`🧹 Cleaning up stale socket ${oldSocketId} for user ${userId}`);
-        io.socketUserMap.delete(oldSocketId);
-        
-        // Force disconnect old socket if it still exists
-        const oldSocket = io.sockets.sockets.get(oldSocketId);
-        if (oldSocket) {
-            oldSocket.disconnect(true);
-        }
-    }
-}
-
-// 🔥 FIX: Transfer host role when host disconnects
-async function transferHostRole(roomId) {
+  async function cleanupRoomAfterEnd(roomId) {
     try {
-        const meeting = await Meeting.findOne({ roomId });
-        if (!meeting || meeting.participants.length === 0) {
-            return null;
-        }
+      const clients = await io.in(roomId).fetchSockets();
+      for (const client of clients) {
+        const mapping = io.socketUserMap.get(client.id);
+        if (mapping) io.userSocketMap.delete(mapping.userId);
 
-        // Find first non-host participant
-        const newHost = meeting.participants.find(p => 
-            p.user.toString() !== meeting.host.toString()
-        );
-
-        if (newHost) {
-            console.log(`👑 Transferring host role to ${newHost.user}`);
-            meeting.host = newHost.user;
-            
-            // Update role
-            const hostParticipant = meeting.participants.find(
-                p => p.user.toString() === newHost.user.toString()
-            );
-            if (hostParticipant) {
-                hostParticipant.role = 'host';
-            }
-            
-            await meeting.save();
-            return newHost.user.toString();
-        }
-
-        return null;
-    } catch (error) {
-        console.error("Error transferring host role:", error);
-        return null;
+        io.socketUserMap.delete(client.id);
+        try { client.leave(roomId); } catch {}
+      }
+    } catch (err) {
+      console.error("cleanupRoomAfterEnd error:", err.message);
     }
-}
+  }
 
-io.on("connection", (socket) => {
-    console.log(`✅ New Client Connected: ${socket.id}`);
+  async function triggerMergeForRoom(roomId) {
+    try {
+      io.in(roomId).emit("merge-started", { message: "Merge started" });
 
-    // 🔥 FIX: Setup ping-pong health check
-    let pingTimeout;
-    let pingInterval = setInterval(() => {
-        socket.emit('ping');
-        pingTimeout = setTimeout(() => {
-            console.log(`⚠️ Socket ${socket.id} failed ping check, disconnecting`);
-            socket.disconnect(true);
-        }, PING_TIMEOUT);
-    }, PING_INTERVAL);
+      const mergeResult = await requestMerge(roomId);
 
-    socket.on('pong', () => {
-        clearTimeout(pingTimeout);
-    });
+      io.in(roomId).emit("merge-success", {
+        message: "Final video generated",
+        finalPath: mergeResult.output || mergeResult.finalPath || null,
+      });
 
-    // Register WebRTC handlers
-    registerWebRTCHandlers(io, socket);
+      console.log("✅ Merge completed for room:", roomId);
+    } catch (err) {
+      console.error("❌ Merge failed for room:", roomId, err?.message || err);
+      io.in(roomId).emit("merge-failed", {
+        message: "Failed to generate final video",
+        error: err?.message || String(err),
+      });
+    }
+  }
 
-    // JOIN ROOM
+  io.on("connection", (socket) => {
+    console.log("✅ Socket connected:", socket.id);
+
+    const getSenderInfo = () => {
+      const mapping = io.socketUserMap.get(socket.id);
+      return mapping
+        ? { userId: mapping.userId, username: mapping.username, roomId: mapping.roomId }
+        : { userId: null, username: null, roomId: null };
+    };
+
+    /* JOIN ROOM */
     socket.on("join-room", async ({ roomId, userId, username }) => {
-        try {
-            if (!roomId || !userId) {
-                socket.emit("join-error", { message: "roomId and userId required" });
-                return;
-            }
+      try {
+        if (!roomId || !userId)
+          return socket.emit("join-error", { message: "roomId and userId required" });
 
-            // Verify meeting exists and is active
-            const meeting = await Meeting.findOne({ roomId });
-            if (!meeting) {
-                socket.emit("join-error", { message: "Meeting not found" });
-                return;
-            }
-            if (meeting.isActive === false) {
-                socket.emit("join-error", { message: "Meeting has ended and cannot be joined." });
-                return;
-            }
+        const meeting = await Meeting.findOne({ roomId });
+        if (!meeting)
+          return socket.emit("join-error", { message: "Meeting not found" });
 
-            // 🔥 FIX: Clean up stale socket before adding new one
-            cleanupStaleSocket(io, userId);
+        if (!meeting.isActive)
+          return socket.emit("join-error", { message: "Meeting has ended" });
 
-            // Store socket mapping (both directions)
-            io.socketUserMap.set(socket.id, { userId, username, roomId });
-            io.userSocketMap.set(userId, socket.id);
+        io.userSocketMap.set(String(userId), socket.id);
+        io.socketUserMap.set(socket.id, { userId: String(userId), username, roomId });
 
-            // Join socket room
-            socket.join(roomId);
-            console.log(`👤 User ${username} (${userId}) joined room ${roomId}`);
+        socket.join(roomId);
 
-            // Add to DB
-            await addParticipantToMeeting(roomId, userId);
-
-            // 🔥 FIX: Notify others with explicit peer sync request
-            socket.to(roomId).emit("user-connected", { 
-                userId, 
-                username,
-                requiresPeerConnection: true 
-            });
-
-            // Get updated participants list
-            const participants = await fetchParticipantsForRoom(roomId);
-
-            // Broadcast updated list to everyone
-            io.in(roomId).emit("participants-updated", participants);
-
-            // Confirm join to the user
-            socket.emit("joined-success", {
-                roomId,
-                participants,
-                hostId: meeting.host.toString(),
-            });
-
-        } catch (error) {
-            console.error("❌ join-room error:", error);
-            socket.emit("join-error", { message: "Failed to join room" });
+        const already = meeting.participants.some(p => p.user.toString() === String(userId));
+        if (!already) {
+          meeting.participants.push({
+            user: userId,
+            role: meeting.host.toString() === String(userId) ? "host" : "participant",
+          });
+          await meeting.save();
         }
+
+        socket.to(roomId).emit("user-connected", {
+          userId,
+          username,
+          requiresPeerConnection: true,
+        });
+
+        io.in(roomId).emit("participants-updated", await getParticipantsList(roomId));
+
+        socket.emit("joined-success", {
+          roomId,
+          participants: await getParticipantsList(roomId),
+          hostId: meeting.host.toString(),
+        });
+
+      } catch (err) {
+        console.error("join-room error:", err.message);
+        socket.emit("join-error", { message: "Failed to join room" });
+      }
     });
 
-    // LEAVE ROOM
+    /* LEAVE ROOM */
     socket.on("leave-room", async ({ roomId, userId }) => {
-        try {
-            if (!roomId || !userId) return;
+      try {
+        if (!roomId || !userId) return;
 
-            console.log(`🚪 User ${userId} leaving room ${roomId}`);
+        io.userSocketMap.delete(String(userId));
+        io.socketUserMap.delete(socket.id);
 
-            const meeting = await Meeting.findOne({ roomId });
-            const isHost = meeting && meeting.host.toString() === userId.toString();
+        socket.leave(roomId);
 
-            // Remove from DB
-            await removeParticipantFromMeeting(roomId, userId);
-
-            // Leave socket room
-            socket.leave(roomId);
-            io.socketUserMap.delete(socket.id);
-            io.userSocketMap.delete(userId);
-
-            // 🔥 FIX: If host left and meeting still has participants, transfer role
-            if (isHost && meeting && meeting.participants.length > 1) {
-                const newHostId = await transferHostRole(roomId);
-                if (newHostId) {
-                    io.in(roomId).emit("host-transferred", { newHostId });
-                }
-            }
-
-            // Notify others to cleanup peer connections
-            socket.to(roomId).emit("user-disconnected", { 
-                userId,
-                cleanupRequired: true 
-            });
-
-            // Get updated list
-            const participants = await fetchParticipantsForRoom(roomId);
-            io.in(roomId).emit("participants-updated", participants);
-
-            socket.emit("left-success", { roomId });
-
-            console.log(`✅ User ${userId} left room ${roomId}`);
-        } catch (error) {
-            console.error("❌ leave-room error:", error);
+        const meeting = await Meeting.findOne({ roomId });
+        if (meeting) {
+          meeting.participants = meeting.participants.filter(
+            (p) => p.user.toString() !== String(userId)
+          );
+          await meeting.save();
+          io.in(roomId).emit("participants-updated", await getParticipantsList(roomId));
         }
+
+        socket.to(roomId).emit("user-disconnected", { userId });
+
+        socket.emit("left-success", { roomId });
+      } catch (err) {
+        console.error("leave-room error:", err.message);
+      }
     });
 
-    // CHAT MESSAGE
-    socket.on("send-message", ({ roomId, userId, username, text }) => {
-        try {
-            if (!roomId || !text || !username) {
-                socket.emit("error", { message: "Invalid message payload" });
-                return;
-            }
+    /* --------------------------------------------------
+       FIX 2 — CHAT FALLBACK SUPPORT
+       (chat, message, chat:message → all normalized)
+    -------------------------------------------------- */
+    const normalizeAndBroadcastChat = (payload) => {
+      try {
+        if (!payload || !payload.roomId || !payload.text) return;
 
-            const messageData = {
-                userId,
-                username,
-                text,
-                timestamp: new Date().toISOString(),
-            };
+        const finalMessage = {
+          roomId: payload.roomId,
+          userId: payload.userId || null,
+          username: payload.username || null,
+          text: payload.text,
+          createdAt: payload.createdAt || new Date().toISOString(),
+        };
 
-            console.log(`💬 Message from ${username} (${roomId}): ${text}`);
+        io.in(finalMessage.roomId).emit("chat:message", finalMessage);
+        console.log("💬 Chat broadcast → room:", finalMessage.roomId, "text:", finalMessage.text);
 
-            io.in(roomId).emit("new-message", messageData);
-            
-        } catch (error) {
-            console.error("❌ send-message error:", error);
-        }
+      } catch (err) {
+        console.error("chat normalization error:", err);
+      }
+    };
+
+    socket.on("chat:message", normalizeAndBroadcastChat);
+    socket.on("chat", normalizeAndBroadcastChat);
+    socket.on("message", normalizeAndBroadcastChat);
+
+    /* WEBRTC */
+    socket.on("webrtc:offer", ({ offer, targetUserId }) => {
+      try {
+        const sender = getSenderInfo();
+        const target = socketForUser(targetUserId);
+        if (target)
+          target.emit("webrtc:offer", { offer, fromUserId: sender.userId });
+      } catch (e) {}
     });
 
-    // END MEETING (Host only)
-    socket.on("end-meeting", async ({ roomId, hostId }) => {
-        try {
-            if (!roomId || !hostId) return;
-
-            console.log(`🛑 Host ${hostId} ending meeting ${roomId}`);
-
-            const meeting = await Meeting.findOne({ roomId });
-            if (!meeting) {
-                console.log("Meeting not found");
-                return;
-            }
-
-            if (meeting.host.toString() !== hostId.toString()) {
-                console.log("❌ Only host can end the meeting");
-                socket.emit("error", { message: "Only host can end meeting" });
-                return;
-            }
-
-            // Mark meeting as inactive
-            meeting.isActive = false;
-            meeting.participants = [];
-            await meeting.save();
-
-            // 🔥 FIX: Notify everyone to cleanup WebRTC connections
-            io.in(roomId).emit("meeting-ended", {
-                message: "Meeting has been ended by the host.",
-                forceCleanup: true
-            });
-
-            // Remove all clients from socket room and cleanup mappings
-            const clients = await io.in(roomId).fetchSockets();
-            for (const client of clients) {
-                const mapping = io.socketUserMap.get(client.id);
-                if (mapping) {
-                    io.userSocketMap.delete(mapping.userId);
-                }
-                io.socketUserMap.delete(client.id);
-                client.leave(roomId);
-            }
-
-            console.log(`✅ Meeting ${roomId} ended and all participants cleared.`);
-
-        } catch (error) {
-            console.error("❌ end-meeting error:", error);
-        }
+    socket.on("webrtc:answer", ({ answer, targetUserId }) => {
+      try {
+        const sender = getSenderInfo();
+        const target = socketForUser(targetUserId);
+        if (target)
+          target.emit("webrtc:answer", { answer, fromUserId: sender.userId });
+      } catch (e) {}
     });
 
-    // 🔥 FIX: Handle disconnecting event for cleanup
-    socket.on("disconnecting", async (reason) => {
-        console.log(`⚠️ Socket ${socket.id} disconnecting:`, reason);
-        
-        const mapping = io.socketUserMap.get(socket.id);
-        if (!mapping) return;
-
-        const { userId, username, roomId } = mapping;
-
-        try {
-            const meeting = await Meeting.findOne({ roomId });
-            if (!meeting) return;
-
-            const isHost = meeting.host.toString() === userId.toString();
-
-            // 🔥 FIX: If host disconnects unexpectedly, end meeting
-            if (isHost) {
-                console.log(`👑 Host ${username} disconnected unexpectedly, ending meeting ${roomId}`);
-                
-                meeting.isActive = false;
-                meeting.participants = [];
-                await meeting.save();
-
-                // Notify all participants
-                socket.to(roomId).emit("meeting-ended", {
-                    message: "Meeting ended: Host disconnected",
-                    forceCleanup: true
-                });
-
-                // Cleanup all mappings for this room
-                const clients = await io.in(roomId).fetchSockets();
-                for (const client of clients) {
-                    const clientMapping = io.socketUserMap.get(client.id);
-                    if (clientMapping) {
-                        io.userSocketMap.delete(clientMapping.userId);
-                    }
-                    io.socketUserMap.delete(client.id);
-                }
-            } else {
-                // Regular participant disconnect
-                await removeParticipantFromMeeting(roomId, userId);
-                
-                socket.to(roomId).emit("user-disconnected", { 
-                    userId, 
-                    username,
-                    cleanupRequired: true 
-                });
-
-                const participants = await fetchParticipantsForRoom(roomId);
-                io.in(roomId).emit("participants-updated", participants);
-            }
-
-            io.socketUserMap.delete(socket.id);
-            io.userSocketMap.delete(userId);
-
-        } catch (error) {
-            console.error("❌ Error in disconnecting handler:", error);
-        }
+    socket.on("webrtc:ice-candidate", ({ candidate, targetUserId }) => {
+      try {
+        const sender = getSenderInfo();
+        const target = socketForUser(targetUserId);
+        if (target)
+          target.emit("webrtc:ice-candidate", { candidate, fromUserId: sender.userId });
+      } catch (e) {}
     });
 
-    // DISCONNECT
-    socket.on("disconnect", async (reason) => {
-        console.log(`🔴 Socket ${socket.id} disconnected:`, reason);
-        
-        // Cleanup ping interval
-        clearInterval(pingInterval);
-        clearTimeout(pingTimeout);
-
-        // Final cleanup
-        const mapping = io.socketUserMap.get(socket.id);
-        if (mapping) {
-            io.socketUserMap.delete(socket.id);
-            io.userSocketMap.delete(mapping.userId);
-        }
-    });
-
-    // START RECORDING (Host only)
+    /* --------------------------------------------------
+       FIX 1 — START RECORDING SUPPORT (HOST ONLY)
+    -------------------------------------------------- */
     socket.on("start-recording", async ({ roomId, hostId }) => {
-        try {
-            console.log(`🎬 Host ${hostId} starting recording in room ${roomId}`);
-            
-            const meeting = await Meeting.findOne({ roomId });
-            if (!meeting) {
-                console.log("❌ Meeting not found");
-                return;
-            }
-            
-            if (meeting.host.toString() !== hostId.toString()) {
-                console.log("❌ Only host can start recording");
-                socket.emit("error", { message: "Only host can start recording" });
-                return;
-            }
-            
-            io.in(roomId).emit("recording-started", {
-                message: "Recording started by host",
-                startTime: new Date().toISOString()
-            });
-            
-            console.log(`✅ Recording started signal sent to room ${roomId}`);
-            
-        } catch (error) {
-            console.error("❌ start-recording error:", error);
-        }
+      try {
+        if (!roomId || !hostId) return;
+
+        const meeting = await Meeting.findOne({ roomId });
+        if (!meeting)
+          return socket.emit("error", { message: "Meeting not found" });
+
+        if (meeting.host.toString() !== String(hostId))
+          return socket.emit("error", { message: "Only host can start recording" });
+
+        console.log(`🎬 Host ${hostId} STARTED recording in room ${roomId}`);
+
+        io.in(roomId).emit("recording-started", {
+          message: "Recording started by host",
+          startTime: new Date().toISOString(),
+        });
+
+      } catch (err) {
+        console.error("start-recording error:", err);
+      }
     });
 
-    // STOP RECORDING (Host only)
+    /* STOP RECORDING */
     socket.on("stop-recording", async ({ roomId, hostId }) => {
-        try {
-            console.log(`🛑 Host ${hostId} stopping recording in room ${roomId}`);
-            
-            const meeting = await Meeting.findOne({ roomId });
-            if (!meeting) {
-                console.log("❌ Meeting not found");
-                return;
-            }
-            
-            if (meeting.host.toString() !== hostId.toString()) {
-                console.log("❌ Only host can stop recording");
-                socket.emit("error", { message: "Only host can stop recording" });
-                return;
-            }
-            
-            io.in(roomId).emit("recording-stopped", {
-                message: "Recording stopped by host",
-                stopTime: new Date().toISOString()
-            });
-            
-            console.log(`✅ Recording stopped signal sent to room ${roomId}`);
-            
-        } catch (error) {
-            console.error("❌ stop-recording error:", error);
-        }
-    });
-});
+      try {
+        const meeting = await Meeting.findOne({ roomId });
+        if (!meeting) return;
 
-server.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT}`);
+        if (meeting.host.toString() !== String(hostId)) return;
+
+        io.in(roomId).emit("recording-stopped", { message: "Recording stopped" });
+
+        setTimeout(() => triggerMergeForRoom(roomId), POST_STOP_UPLOAD_GRACE_MS);
+
+      } catch (err) {
+        console.error("stop-recording error:", err);
+      }
+    });
+
+    /* END MEETING */
+    socket.on("end-meeting", async ({ roomId, hostId }) => {
+      try {
+        const meeting = await Meeting.findOne({ roomId });
+        if (!meeting) return;
+
+        if (meeting.host.toString() !== String(hostId)) return;
+
+        io.in(roomId).emit("meeting-ended");
+
+        meeting.isActive = false;
+        meeting.participants = [];
+        await meeting.save();
+
+        setTimeout(async () => {
+          triggerMergeForRoom(roomId);
+          await cleanupRoomAfterEnd(roomId);
+        }, POST_STOP_UPLOAD_GRACE_MS);
+
+      } catch (err) {}
+    });
+
+    /* DISCONNECT */
+    socket.on("disconnect", async (reason) => {
+      const mapping = io.socketUserMap.get(socket.id);
+      if (!mapping) return;
+
+      const { userId, roomId } = mapping;
+
+      io.socketUserMap.delete(socket.id);
+      io.userSocketMap.delete(String(userId));
+
+      const meeting = await Meeting.findOne({ roomId });
+      if (!meeting) return;
+
+      meeting.participants = meeting.participants.filter(
+        (p) => p.user.toString() !== String(userId)
+      );
+      await meeting.save();
+
+      io.in(roomId).emit("participants-updated", await getParticipantsList(roomId));
+    });
+  });
+
+  server.listen(PORT, () => console.log(`🚀 Server listening on port ${PORT}`));
 });

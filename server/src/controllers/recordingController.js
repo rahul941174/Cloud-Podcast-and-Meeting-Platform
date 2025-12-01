@@ -1,198 +1,208 @@
-import { saveChunk } from '../utils/fileHelper.js';
-import { getMeetingDir } from '../utils/fileHelper.js';
+// server/src/controllers/recordingController.js
 import fs from 'fs';
 import path from 'path';
+import { ensureMeetingUserDirs, getMeetingDir, saveChunkToDisk } from '../utils/fileHelper.js';
 
 /**
- * Upload a recording chunk
+ * POST /api/recordings/upload-chunk
+ * Body:
+ * {
+ *   roomId: string,
+ *   userId: string,
+ *   chunkId: string,        // e.g. "169xxx_0" (unique per chunk)
+ *   chunkData: string,      // base64 or dataURI
+ * }
  */
 export const uploadChunk = async (req, res) => {
-    try {
-        console.log(`\n🔍 CONTROLLER RECEIVED:`);
-        console.log(`   roomId: ${req.body.roomId}`);
-        console.log(`   userId: ${req.body.userId}`);
-        console.log(`   chunkIndex: ${req.body.chunkIndex}`);
-        console.log(`   chunkData length: ${req.body.chunkData?.length}\n`);
-        
-        const { roomId, userId, chunkIndex, chunkData } = req.body;
-        
-        // Validate required fields
-        if (!roomId || !userId || chunkIndex === undefined) {
-            return res.status(400).json({
-                message: 'Missing required fields: roomId, userId, or chunkIndex'
-            });
-        }
-        
-        if (!chunkData) {
-            return res.status(400).json({
-                message: 'No chunk data provided'
-            });
-        }
-        
-        console.log(`📥 Receiving chunk ${chunkIndex} from user ${userId}`);
-        console.log(`   Base64 length: ${chunkData.length} chars`);
-        
-        // Convert base64 to buffer
-        let buffer;
-        try {
-            buffer = Buffer.from(chunkData, 'base64');
-        } catch (error) {
-            console.error('❌ Invalid base64 data:', error);
-            return res.status(400).json({
-                message: 'Invalid chunk data format'
-            });
-        }
-        
-        // Verify buffer size (must be at least 1KB)
-        if (buffer.length < 1000) {
-            console.error(`❌ Suspiciously small buffer: ${buffer.length} bytes`);
-            return res.status(400).json({
-                message: 'Chunk data too small - possible corruption',
-                receivedSize: buffer.length
-            });
-        }
-        
-        console.log(`✅ Valid chunk: ${buffer.length} bytes (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
-        
-        // Save chunk to disk
-        const result = await saveChunk(roomId, userId, chunkIndex, buffer);
-        
-        // Verify file was saved correctly
-        const savedSize = fs.statSync(result.filepath).size;
-        
-        if (savedSize !== buffer.length) {
-            console.error(`⚠️ Size mismatch! Buffer: ${buffer.length}, Saved: ${savedSize}`);
-            return res.status(500).json({
-                message: 'File save verification failed - size mismatch',
-                expected: buffer.length,
-                actual: savedSize
-            });
-        }
-        
-        if (savedSize < 1000) {
-            console.error(`⚠️ CORRUPT CHUNK DETECTED: ${savedSize} bytes`);
-            
-            try {
-                fs.unlinkSync(result.filepath);
-                console.log(`🗑️ Deleted corrupt chunk file`);
-            } catch (e) {
-                console.error('Failed to delete corrupt file:', e);
-            }
-            
-            return res.status(400).json({
-                message: 'Chunk appears corrupted (too small)',
-                receivedSize: savedSize
-            });
-        }
-        
-        console.log(`✅ Chunk ${chunkIndex} saved and verified: ${savedSize} bytes (${(savedSize / 1024 / 1024).toFixed(2)} MB)`);
-        console.log(`   Saved as: ${result.filename}\n`);
-        
-        // Return success
-        res.status(200).json({
-            message: 'Chunk uploaded successfully',
-            chunkIndex,
-            size: savedSize,
-            sizeMB: (savedSize / 1024 / 1024).toFixed(2),
-            filename: result.filename,
-            ...result
-        });
-        
-    } catch (error) {
-        console.error('❌ Error uploading chunk:', error);
-        res.status(500).json({
-            message: 'Error uploading chunk',
-            error: error.message
-        });
+  try {
+    const { roomId, userId, chunkIndex, chunkId, chunkData } = req.body;
+
+    // Basic validation
+    if (!roomId || !userId) {
+      return res.status(400).json({ message: "roomId and userId are required" });
     }
+
+    if (!chunkIndex && chunkIndex !== 0 && !chunkId) {
+      // FIX: server now accepts chunkIndex or chunkId
+      return res.status(400).json({ message: "chunkIndex or chunkId is required" });
+    }
+
+    if (!chunkData || typeof chunkData !== "string") {
+      return res.status(400).json({ message: "chunkData missing or invalid" });
+    }
+
+    // Ensure dirs exist
+    const { meetingDir, userDir } = ensureMeetingUserDirs(roomId, userId);
+
+    // FIX: Generate correct chunkId
+    const timestamp = Date.now();
+    const finalChunkId = chunkId
+      ? chunkId
+      : `${timestamp}-${chunkIndex}`; // FIX: deterministic "timestamp-index" format
+
+    // FIX: filename safe
+    const safeName = finalChunkId.replace(/[^a-zA-Z0-9-_\.]/g, "_");
+    const filename = `${safeName}.webm`;
+    const filepath = path.join(userDir, filename);
+
+    // Support both dataURI + raw base64
+    let base64 = chunkData;
+    const comma = chunkData.indexOf(",");
+    if (comma !== -1) base64 = chunkData.substring(comma + 1);
+
+    // Decode base64 → buffer
+    let buffer;
+    try {
+      buffer = Buffer.from(base64, "base64");
+      if (!buffer || buffer.length === 0) {
+        return res.status(400).json({ message: "Decoded chunk buffer is empty" });
+      }
+    } catch (err) {
+      console.error("Base64 decode failed:", err);
+      return res.status(400).json({ message: "Failed to decode base64 chunkData" });
+    }
+
+    // Save chunk through atomic write
+    try {
+      await saveChunkToDisk(filepath, buffer);
+    } catch (err) {
+      console.error("Failed to save chunk:", err);
+      return res.status(500).json({ message: "Failed to save chunk", error: err.message });
+    }
+
+    const stat = fs.statSync(filepath);
+
+    console.log(`📥 Saved chunk ${filename} (${stat.size} bytes) for user ${userId} in room ${roomId}`);
+
+    return res.status(200).json({
+      message: "Chunk uploaded",
+      roomId,
+      userId,
+      chunkId: finalChunkId,
+      filename,
+      sizeBytes: stat.size,
+    });
+
+  } catch (error) {
+    console.error("uploadChunk error:", error);
+    return res.status(500).json({
+      message: "Server error uploading chunk",
+      error: error.message,
+    });
+  }
 };
 
 /**
- * Get recording status for a meeting
- * Returns info about chunks uploaded and final video status
+ * GET /api/recordings/status/:roomId
+ * Returns per-user chunk counts, sizes, and whether final video exists.
  */
 export const getRecordingStatus = async (req, res) => {
-    try {
-        const { roomId } = req.params;
-        
-        if (!roomId) {
-            return res.status(400).json({
-                message: 'roomId is required'
-            });
-        }
-        
-        const meetingDir = getMeetingDir(roomId);
-        
-        // Check if directory exists
-        if (!fs.existsSync(meetingDir)) {
-            return res.status(404).json({
-                message: 'No recordings found for this meeting',
-                roomId,
-                hasRecording: false
-            });
-        }
-        
-        // Get all user directories
-        const items = fs.readdirSync(meetingDir);
-        const userDirs = items.filter(item => {
-            const itemPath = path.join(meetingDir, item);
-            return fs.statSync(itemPath).isDirectory();
-        });
-        
-        // Count chunks per user
-        const userChunks = {};
-        let totalChunks = 0;
-        let totalSize = 0;
-        
-        for (const userId of userDirs) {
-            const userDir = path.join(meetingDir, userId);
-            const chunks = fs.readdirSync(userDir).filter(f => f.endsWith('.webm'));
-            
-            userChunks[userId] = {
-                count: chunks.length,
-                chunks: chunks.sort()
-            };
-            
-            totalChunks += chunks.length;
-            
-            // Calculate total size
-            chunks.forEach(chunk => {
-                const chunkPath = path.join(userDir, chunk);
-                totalSize += fs.statSync(chunkPath).size;
-            });
-        }
-        
-        // Check if final video exists
-        const finalVideoPath = path.join(meetingDir, 'final-recording.mp4');
-        const hasFinalVideo = fs.existsSync(finalVideoPath);
-        
-        let finalVideoInfo = null;
-        if (hasFinalVideo) {
-            const stats = fs.statSync(finalVideoPath);
-            finalVideoInfo = {
-                size: stats.size,
-                sizeMB: (stats.size / 1024 / 1024).toFixed(2),
-                created: stats.birthtime
-            };
-        }
-        
-        res.status(200).json({
-            message: 'Recording status retrieved',
-            roomId,
-            hasRecording: totalChunks > 0 || hasFinalVideo,
-            userCount: userDirs.length,
-            totalChunks,
-            totalSizeMB: (totalSize / 1024 / 1024).toFixed(2),
-            userChunks,
-            hasFinalVideo,
-            finalVideo: finalVideoInfo
-        });
-        
-    } catch (error) {
-        console.error('❌ Error getting recording status:', error);
-        res.status(500).json({
-            message: 'Error getting recording status',
-            error: error.message
-        });
+  try {
+    const { roomId } = req.params;
+    if (!roomId) return res.status(400).json({ message: 'roomId required' });
+
+    const meetingDir = getMeetingDir(roomId);
+    if (!fs.existsSync(meetingDir)) {
+      return res.status(404).json({ message: 'No recordings found for this meeting', roomId });
     }
+
+    const items = fs.readdirSync(meetingDir);
+    const userDirs = items.filter((it) => fs.statSync(path.join(meetingDir, it)).isDirectory());
+
+    const userChunks = {};
+    let totalChunks = 0;
+    let totalSize = 0;
+
+    for (const userId of userDirs) {
+      const userDir = path.join(meetingDir, userId);
+      const chunks = fs
+        .readdirSync(userDir)
+        .filter((f) => f.endsWith('.webm'))
+        .sort((a, b) => {
+          // Prefer lexicographic (timestamp prefix) fallback to mtime
+          const aNum = a.split('.')[0];
+          const bNum = b.split('.')[0];
+          if (aNum && bNum && /^\d+/.test(aNum) && /^\d+/.test(bNum)) {
+            return aNum.localeCompare(bNum, undefined, { numeric: true });
+          }
+          // else fallback to mtime
+          const am = fs.statSync(path.join(userDir, a)).mtimeMs;
+          const bm = fs.statSync(path.join(userDir, b)).mtimeMs;
+          return am - bm;
+        });
+
+      let userSize = 0;
+      for (const c of chunks) {
+        try {
+          userSize += fs.statSync(path.join(userDir, c)).size;
+        } catch (e) {
+          // ignore unreadable file
+        }
+      }
+
+      userChunks[userId] = {
+        count: chunks.length,
+        chunks,
+        sizeBytes: userSize,
+        sizeMB: (userSize / 1024 / 1024).toFixed(2),
+      };
+
+      totalChunks += chunks.length;
+      totalSize += userSize;
+    }
+
+    const finalPath = path.join(meetingDir, 'final-recording.mp4');
+    const hasFinal = fs.existsSync(finalPath);
+    let finalInfo = null;
+    if (hasFinal) {
+      const s = fs.statSync(finalPath);
+      finalInfo = { sizeBytes: s.size, sizeMB: (s.size / 1024 / 1024).toFixed(2), createdAt: s.birthtime };
+    }
+
+    return res.status(200).json({
+      message: 'Recording status',
+      roomId,
+      userCount: userDirs.length,
+      totalChunks,
+      totalSizeMB: (totalSize / 1024 / 1024).toFixed(2),
+      userChunks,
+      hasFinalVideo: hasFinal,
+      finalInfo,
+    });
+  } catch (error) {
+    console.error('getRecordingStatus error:', error);
+    return res.status(500).json({ message: 'Server error fetching status', error: error.message });
+  }
+};
+
+/**
+ * GET /api/recordings/:roomId/:userId/chunk/:chunkId
+ * Stream a specific chunk (debugging)
+ */
+export const streamChunk = (req, res) => {
+  try {
+    const { roomId, userId, chunkId } = req.params;
+    if (!roomId || !userId || !chunkId) {
+      return res.status(400).json({ message: 'Missing params' });
+    }
+
+    const meetingDir = getMeetingDir(roomId);
+    const chunkFile = `${chunkId}.webm`;
+    const chunkPath = path.join(meetingDir, userId, chunkFile);
+
+    if (!fs.existsSync(chunkPath)) return res.status(404).json({ message: 'Chunk not found' });
+
+    res.setHeader('Content-Type', 'video/webm');
+    const stream = fs.createReadStream(chunkPath);
+    stream.pipe(res);
+  } catch (error) {
+    console.error('streamChunk error:', error);
+    return res.status(500).json({ message: 'Error streaming chunk', error: error.message });
+  }
+};
+
+export default {
+  uploadChunk,
+  getRecordingStatus,
+  streamChunk,
 };

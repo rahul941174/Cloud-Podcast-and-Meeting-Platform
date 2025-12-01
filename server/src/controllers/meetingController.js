@@ -1,165 +1,172 @@
+// server/src/controllers/meetingController.js
 import Meeting from "../models/Meeting.js";
-import { v4 as uuidv4 } from "uuid";
 import User from "../models/User.js";
+import { v4 as uuidv4 } from "uuid";
 
-// CREATE MEETING
+/**
+ * POST /api/meetings/create
+ * Create a new meeting
+ */
 export const createMeeting = async (req, res) => {
-    try {
-        const { title, metaData } = req.body;
-        const userId = req.user.id;
+  try {
+    const userId = req.user.id;
+    const host = await User.findById(userId);
 
-        const host = await User.findById(userId);
-        if (!host) {
-            return res.status(404).json({
-                message: 'Host user not found'
-            });
-        }
-
-        const roomId = uuidv4();
-
-        // DON'T add host to participants here
-        // Let socket handle it when they join
-        const meeting = new Meeting({
-            roomId,
-            title: title || `${host.username}'s Meeting`,
-            host: userId,
-            metaData: metaData || {},
-            participants: [], // Empty initially
-            isActive: true
-        });
-
-        await meeting.save();
-
-        res.status(201).json({
-            meeting,
-            message: 'Meeting created successfully'
-        });
-
-    } catch (error) {
-        res.status(500).json({
-            message: 'Error in creating meeting',
-            error: error.message
-        });
+    if (!host) {
+      return res.status(404).json({ message: "Host user not found" });
     }
+
+    const roomId = uuidv4();
+
+    const meeting = new Meeting({
+      roomId,
+      title: `${host.username}'s Meeting`,
+      host: userId,
+      isActive: true,
+      participants: [], // participants pushed only when socket join-room happens
+      metaData: {}
+    });
+
+    await meeting.save();
+
+    return res.status(201).json({
+      message: "Meeting created",
+      meeting,
+    });
+
+  } catch (error) {
+    console.error("❌ createMeeting error:", error);
+    return res.status(500).json({
+      message: "Error creating meeting",
+      error: error.message,
+    });
+  }
 };
 
-// JOIN MEETING
+
+/**
+ * POST /api/meetings/join/:roomId
+ * Validate meeting BEFORE socket joins it
+ */
 export const joinMeeting = async (req, res) => {
-    try {
-        const { roomId } = req.params;
-        const userId = req.user.id;
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
 
-        if (!roomId) {
-            return res.status(400).json({
-                message: 'roomId is required to join meeting'
-            });
-        }
-
-        const meeting = await Meeting.findOne({ roomId });
-        if (!meeting) {
-            return res.status(404).json({
-                message: 'Meeting not found with such roomId'
-            });
-        }
-
-        if (meeting.isActive === false) {
-            return res.status(410).json({
-                message: 'This meeting has ended and cannot be joined.'
-            });
-        }
-
-        //  DON'T add participant here - let socket handle it
-        // Just verify the meeting is valid
-        const isAlreadyParticipant = meeting.participants.some(
-            p => p.user.toString() === userId
-        );
-
-        res.status(200).json({
-            message: isAlreadyParticipant 
-                ? "Already in meeting" 
-                : "Meeting is active, ready to join",
-            meeting: {
-                roomId: meeting.roomId,
-                title: meeting.title,
-                participantsCount: meeting.participants.length,
-                isActive: meeting.isActive
-            },
-        });
-
-    } catch (error) {
-        res.status(500).json({
-            message: 'Error in joining meeting',
-            error: error.message
-        });
+    if (!roomId) {
+      return res.status(400).json({ message: "roomId required" });
     }
+
+    const meeting = await Meeting.findOne({ roomId });
+
+    if (!meeting) {
+      return res.status(404).json({ message: "Meeting not found" });
+    }
+
+    if (!meeting.isActive) {
+      return res.status(410).json({ message: "Meeting has ended" });
+    }
+
+    const alreadyInMeeting = meeting.participants.some(
+      (p) => p.user.toString() === userId
+    );
+
+    return res.status(200).json({
+      message: alreadyInMeeting ? "Already in meeting" : "Ready to join",
+      meeting: {
+        roomId: meeting.roomId,
+        title: meeting.title,
+        host: meeting.host,
+        participantsCount: meeting.participants.length,
+        isActive: meeting.isActive,
+      },
+    });
+
+  } catch (error) {
+    console.error("❌ joinMeeting error:", error);
+    return res.status(500).json({
+      message: "Error joining meeting",
+      error: error.message,
+    });
+  }
 };
 
-// GET MEETING DETAILS
+
+/**
+ * GET /api/meetings/:roomId
+ * Fetch meeting details
+ */
 export const getMeetingDetails = async (req, res) => {
-    try {
-        const { roomId } = req.params;
+  try {
+    const { roomId } = req.params;
 
-        if (!roomId) {
-            return res.status(400).json({
-                message: 'roomId is required to fetch meeting details'
-            });
-        }
-
-        const meeting = await Meeting.findOne({ roomId })
-            .populate("participants.user", "username email")
-            .populate("host", "username email");
-
-        if (!meeting) {
-            return res.status(404).json({
-                message: 'Meeting not found with such roomId'
-            });
-        }
-
-        res.status(200).json({
-            meeting,
-            message: 'Meeting details fetched successfully'
-        });
-    } catch (error) {
-        res.status(500).json({
-            message: 'Error in fetching meeting details',
-            error: error.message
-        });
+    if (!roomId) {
+      return res.status(400).json({ message: "roomId required" });
     }
+
+    const meeting = await Meeting.findOne({ roomId })
+      .populate("host", "username email")
+      .populate("participants.user", "username email");
+
+    if (!meeting) {
+      return res.status(404).json({ message: "Meeting not found" });
+    }
+
+    return res.status(200).json({
+      message: "Meeting details fetched",
+      meeting,
+    });
+
+  } catch (error) {
+    console.error("❌ getMeetingDetails error:", error);
+    return res.status(500).json({
+      message: "Error fetching meeting details",
+      error: error.message,
+    });
+  }
 };
 
 
-export const endMeeting=async(req,res)=>{
-    try{
+/**
+ * POST /api/meetings/end/:roomId
+ * Host ends the meeting
+ */
+export const endMeeting = async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
 
-        const { roomId } = req.params;
+    const meeting = await Meeting.findOne({ roomId });
 
-        if (!roomId) {
-            return res.status(400).json({
-                message: 'roomId is required to fetch meeting details'
-            });
-        }
-
-        const meeting = await Meeting.findOne({ roomId });
-        if (!meeting) {
-            return res.status(404).json({
-                message: 'Meeting not found with such roomId'
-            });
-        }
-
-        meeting.isActive=false;
-
-        await meeting.save();
-
-        res.status(200).json({
-            message: 'Meeting acive set false successfully'
-        });
-
-
+    if (!meeting) {
+      return res.status(404).json({ message: "Meeting not found" });
     }
-    catch(error){
-        res.status(500).json({
-            message: 'Error in ending meeting',
-            error: error.message
-        });
-    }   
+
+    if (meeting.host.toString() !== userId.toString()) {
+      return res.status(403).json({ message: "Only host can end the meeting" });
+    }
+
+    meeting.isActive = false;
+    meeting.participants = [];
+    await meeting.save();
+
+    return res.status(200).json({
+      message: "Meeting ended successfully",
+      roomId,
+    });
+
+  } catch (error) {
+    console.error("❌ endMeeting error:", error);
+    return res.status(500).json({
+      message: "Error ending meeting",
+      error: error.message,
+    });
+  }
+};
+
+export default {
+  createMeeting,
+  joinMeeting,
+  getMeetingDetails,
+  endMeeting,
 };
